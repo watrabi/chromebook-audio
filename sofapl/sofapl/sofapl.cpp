@@ -350,6 +350,8 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
     ULONG payloadSize = 0;
     PVOID bdlPtr = NULL;
     HDAUDIO_STREAM_FORMAT fmt;
+    BOOLEAN spibEnabled = FALSE;
+    PUINT8 sdBase = NULL;
 
     // ---- validate resources ----
     stage = L"resources";
@@ -459,8 +461,14 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
         WRITE_REGISTER_USHORT(sdFmt, CL_STREAM_FORMAT);
         WRITE_REGISTER_ULONG(ppctl, READ_REGISTER_ULONG(ppctl) | PPCTL_PROCEN(idx));
 
-        LogLine(ctx, L"Code loader stream: tag %u, index %u, DMA phys 0x%llX, format 0x%04X",
-            tag, idx, phys.QuadPart, READ_REGISTER_USHORT(sdFmt));
+        // Enable SPIB with the full payload size so the DMA engine is allowed
+        // to move the whole buffer (hda_dsp_stream_spib_config in Linux).
+        ctx->Bus.DSPEnableSPIB(ctx->Bus.Context, stream, payloadSize);
+        spibEnabled = TRUE;
+
+        sdBase = ctx->HdaBar.Base.baseptr + HDA_SD_BASE + HDA_SD_STRIDE * idx;
+        LogLine(ctx, L"Code loader stream: tag %u, index %u, DMA phys 0x%llX, format 0x%04X, SPIB %u",
+            tag, idx, phys.QuadPart, READ_REGISTER_USHORT(sdFmt), payloadSize);
     }
 
     // ---- ROM init (with retries) ----
@@ -476,6 +484,14 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
     stage = L"fw-download";
     ctx->Bus.TriggerDSP(ctx->Bus.Context, stream, TRUE);
     st = DspPollRomState(ctx, FSR_STATE_FW_ENTERED, TIMEOUT_BASEFW_US, &v);
+    {
+        // stream diagnostics: SD_CTL (24-bit) + SD_STS, LPIB, position buffer
+        ULONG sdCtlSts = READ_REGISTER_ULONG((PULONG)(sdBase + 0x0));
+        ULONG lpib = READ_REGISTER_ULONG((PULONG)(sdBase + 0x4));
+        ULONG posbuf = ctx->Bus.StreamPosition(ctx->Bus.Context, stream);
+        LogLine(ctx, L"After DMA: SD_CTL/STS=0x%08X LPIB=%u POSBUF=%u PPCTL=0x%08X",
+            sdCtlSts, lpib, posbuf, READ_REGISTER_ULONG((PULONG)(ctx->Ppcap + PP_REG_PPCTL)));
+    }
     ctx->Bus.TriggerDSP(ctx->Bus.Context, stream, FALSE);
     if (!NT_SUCCESS(st)) {
         LogLine(ctx, L"Timeout waiting for FW_ENTERED, ROM_STATUS=0x%08X ROM_ERROR=0x%08X",
@@ -530,6 +546,9 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
 
 out:
     if (stream) {
+        if (spibEnabled) {
+            ctx->Bus.DSPDisableSPIB(ctx->Bus.Context, stream);
+        }
         ctx->Bus.CleanupDSP(ctx->Bus.Context, stream);
         NTSTATUS fst = ctx->Bus.FreeStream(ctx->Bus.Context, stream);
         if (!NT_SUCCESS(fst)) {
@@ -551,7 +570,7 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     ctx->Log[0] = L'\0';
-    LogLine(ctx, L"sofapl milestone 2 driver starting");
+    LogLine(ctx, L"sofapl milestone 2 driver starting (build 2: SPIB)");
 
     NTSTATUS st = WdfFdoQueryForInterface(Device, &GUID_ADSP_BUS_INTERFACE,
         (PINTERFACE)&ctx->Bus, sizeof(ADSP_BUS_INTERFACE), 1, NULL);
