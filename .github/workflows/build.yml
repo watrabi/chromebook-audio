@@ -24,22 +24,17 @@ jobs:
           if (-not $wdm) { throw 'WDK headers not found on runner' }
           $wdm | Select-Object -ExpandProperty FullName
 
-      - name: Inspect WDK InfVerif wiring
+      - name: Collect WDK diagnostics
         shell: pwsh
         run: |
-          $t = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\build\*\WindowsDriver.common.targets' | Sort-Object FullName -Descending | Select-Object -First 1
-          Write-Host "::notice::targets file: $($t.FullName)"
-          $lines = Get-Content $t.FullName
-          $show = @()
-          $show += 655..672
-          $hits = Select-String -Path $t.FullName -Pattern 'Name="Inf2Cat|Inf2CatEnabled|EnableInf2cat|Name="StampInf|RunInfVerif|EnableInfVerif' | ForEach-Object { $_.LineNumber }
-          foreach ($n in $hits) { $show += ($n-2)..($n+3) }
-          $show | Sort-Object -Unique | Where-Object { $_ -ge 1 -and $_ -le $lines.Count } | ForEach-Object {
-            $txt = $lines[$_-1].Trim()
-            if ($txt) { Write-Host ("::notice::L{0}: {1}" -f $_, $txt) }
+          $diag = Join-Path $env:RUNNER_TEMP 'logs'
+          New-Item -ItemType Directory -Force $diag | Out-Null
+          $kits = 'C:\Program Files (x86)\Windows Kits\10'
+          Get-ChildItem "$kits\build\*\WindowsDriver.common.targets" | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path $diag ("targets-" + $_.Directory.Name + ".xml"))
           }
-          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Tools' -Recurse -Filter 'InfVerif*' -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host "::notice::found $($_.FullName)" }
+          Get-ChildItem $kits -Recurse -Include 'InfVerif*','Inf2Cat*' -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName | Out-File (Join-Path $diag 'wdk-tools.txt')
 
       - name: Build drivers
         shell: pwsh
@@ -51,7 +46,7 @@ jobs:
           )
           foreach ($p in $projects) {
             Write-Host "=== Building $p"
-            $log = Join-Path $env:RUNNER_TEMP ("build-" + [IO.Path]::GetFileNameWithoutExtension($p) + ".log")
+            $log = Join-Path $env:RUNNER_TEMP ("logs\build-" + [IO.Path]::GetFileNameWithoutExtension($p) + ".log")
             msbuild $p /m /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:SpectreMitigation=false /v:minimal "/flp:logfile=$log;verbosity=normal"
             $code = $LASTEXITCODE
             # Surface compiler/linker/INF errors and warnings as annotations
@@ -115,3 +110,19 @@ jobs:
             --title "Latest build ($($env:GITHUB_SHA.Substring(0,7)))" `
             --notes "Unsigned test build. Sign and install with scripts/install-drivers.ps1."
           if ($LASTEXITCODE -ne 0) { throw 'Release publish failed' }
+
+      # Always publish the full build logs (success or failure) so they can be
+      # read without signing in to GitHub.
+      - name: Publish build logs
+        if: always() && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $diag = Join-Path $env:RUNNER_TEMP 'logs'
+          New-Item -ItemType Directory -Force $diag | Out-Null
+          "commit $env:GITHUB_SHA run $env:GITHUB_RUN_ID" | Out-File (Join-Path $diag 'info.txt')
+          Compress-Archive -Path "$diag\*" -DestinationPath build-logs.zip -Force
+          gh release delete build-logs --yes --cleanup-tag 2>$null
+          gh release create build-logs build-logs.zip --prerelease --target $env:GITHUB_SHA `
+            --title "Build logs ($($env:GITHUB_SHA.Substring(0,7)))" --notes "Logs from the most recent CI run."
