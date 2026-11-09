@@ -722,7 +722,12 @@ InstallAllCaptureFilters(
 
     PAGED_CODE();
 
-    for (ULONG i = 0; i < g_cCaptureEndpoints; ++i, ++ppAeMiniports)
+    // SOF: g_cCaptureEndpoints is 0 for now; compare against a runtime value
+    // so the "always false" warning (C4296, treated as error) does not fire.
+    volatile ULONG captureCount = g_cCaptureEndpoints;
+    ntStatus = STATUS_SUCCESS;
+
+    for (ULONG i = 0; i < captureCount; ++i, ++ppAeMiniports)
     {
         ntStatus = InstallEndpointCaptureFilters(_pDeviceObject, _pIrp, _pAdapterCommon, *ppAeMiniports);
         IF_FAILED_JUMP(ntStatus, Exit);
