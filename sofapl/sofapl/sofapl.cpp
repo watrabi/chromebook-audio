@@ -309,13 +309,50 @@ static void MboxWrite(PDEVICE_CONTEXT ctx, ULONG off, const VOID* buf, ULONG len
 
 // Parse the extended data that follows FW_READY (ipc3_fw_parse_ext_data)
 // to find the IPC mailbox windows.
+static void ParseExtChain(PDEVICE_CONTEXT ctx, ULONG offset);
+
+static void DumpWords(PDEVICE_CONTEXT ctx, PCWSTR label, ULONG offset, ULONG words)
+{
+    for (ULONG i = 0; i < words; i += 8) {
+        ULONG w[8] = { 0 };
+        MboxRead(ctx, offset + i * 4, w, sizeof(w));
+        LogLine(ctx, L"  %s 0x%05X: %08X %08X %08X %08X %08X %08X %08X %08X",
+            label, offset + i * 4, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+    }
+}
+
 static void ParseExtData(PDEVICE_CONTEXT ctx, ULONG offset)
+{
+    DumpWords(ctx, L"after FW_READY", offset, 16);
+    ParseExtChain(ctx, offset);
+    if (ctx->HostBoxSize && ctx->DspBoxSize) return;
+
+    // Not where Linux expects it: scan SRAM window 0 for a window ext header
+    // (cmd = FW_READY, type = EXT_WINDOW) and report where it was found.
+    for (ULONG off = SRAM_WINDOW_OFFSET(0); off + 16 <= SRAM_WINDOW_OFFSET(0) + 0x4000; off += 4) {
+        SOF_IPC_EXT_DATA_HDR eh;
+        MboxRead(ctx, off, &eh, sizeof(eh));
+        if (eh.hdr.cmd == SOF_IPC_FW_READY && eh.type == SOF_IPC_EXT_WINDOW &&
+            eh.hdr.size >= sizeof(eh) + 4 && eh.hdr.size <= 4096) {
+            LogLine(ctx, L"  found window ext header at 0x%X (expected 0x%X)", off, offset);
+            ParseExtChain(ctx, off);
+            if (ctx->HostBoxSize && ctx->DspBoxSize) return;
+        }
+    }
+    LogLine(ctx, L"  no window ext header found in window 0");
+}
+
+static void ParseExtChain(PDEVICE_CONTEXT ctx, ULONG offset)
 {
     for (int guard = 0; guard < 16; guard++) {
         if (offset + sizeof(SOF_IPC_EXT_DATA_HDR) > ctx->DspBar.Len) break;
         SOF_IPC_EXT_DATA_HDR eh;
         MboxRead(ctx, offset, &eh, sizeof(eh));
         if (eh.hdr.cmd != SOF_IPC_FW_READY || eh.hdr.size < sizeof(eh) || eh.hdr.size > 4096) {
+            if (guard == 0) {
+                LogLine(ctx, L"  no ext header at 0x%X (cmd 0x%08X size %u type %u)",
+                    offset, eh.hdr.cmd, eh.hdr.size, eh.type);
+            }
             break;
         }
         LogLine(ctx, L"  ext data type %u, %u bytes", eh.type, eh.hdr.size);
@@ -930,7 +967,7 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     ctx->Log[0] = L'\0';
-    LogLine(ctx, L"sofapl 0.3.0 starting (milestone 3a: IPC + speaker pipeline, silent)");
+    LogLine(ctx, L"sofapl 0.3.1 starting (milestone 3a: IPC + speaker pipeline, silent)");
 
     NTSTATUS st = WdfFdoQueryForInterface(Device, &GUID_ADSP_BUS_INTERFACE,
         (PINTERFACE)&ctx->Bus, sizeof(ADSP_BUS_INTERFACE), 1, NULL);
