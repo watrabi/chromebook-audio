@@ -4,21 +4,10 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  # Diagnostics: tell us whether runners start at all for this account.
-  hello-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Linux runner OK"
-
-  hello-windows:
-    runs-on: windows-latest
-    steps:
-      - shell: pwsh
-        run: |
-          Write-Host "Windows runner OK: $([Environment]::OSVersion.VersionString)"
-          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
-
   build:
     runs-on: windows-2022
     steps:
@@ -74,3 +63,18 @@ jobs:
         with:
           name: drivers-unsigned
           path: out/
+
+      # Publish to a rolling "latest-build" pre-release so the package can be
+      # downloaded without signing in.
+      - name: Publish latest-build release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path out\* -DestinationPath drivers-unsigned.zip -Force
+          gh release delete latest-build --yes --cleanup-tag 2>$null
+          gh release create latest-build drivers-unsigned.zip --prerelease --target $env:GITHUB_SHA `
+            --title "Latest build ($($env:GITHUB_SHA.Substring(0,7)))" `
+            --notes "Unsigned test build. Sign and install with scripts/install-drivers.ps1."
+          if ($LASTEXITCODE -ne 0) { throw 'Release publish failed' }
