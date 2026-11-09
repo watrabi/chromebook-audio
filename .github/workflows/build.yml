@@ -5,6 +5,20 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Diagnostics: tell us whether runners start at all for this account.
+  hello-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Linux runner OK"
+
+  hello-windows:
+    runs-on: windows-latest
+    steps:
+      - shell: pwsh
+        run: |
+          Write-Host "Windows runner OK: $([Environment]::OSVersion.VersionString)"
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+
   build:
     runs-on: windows-2022
     steps:
