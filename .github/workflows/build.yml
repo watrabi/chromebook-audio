@@ -29,7 +29,8 @@ jobs:
         run: |
           $projects = @(
             'sklhdaudbus\sklhdaudbus\sklhdaudbus.vcxproj',
-            'da7219\da7219\da7219.vcxproj'
+            'da7219\da7219\da7219.vcxproj',
+            'sofapl\sofapl\sofapl.vcxproj'
           )
           foreach ($p in $projects) {
             Write-Host "=== Building $p"
@@ -44,7 +45,18 @@ jobs:
           $inf2cat = Get-ChildItem "$kits\bin\*\x86\Inf2Cat.exe" | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $inf2cat) { throw 'Inf2Cat not found' }
           $out = Join-Path $PWD 'out'
-          foreach ($name in 'sklhdaudbus','da7219') {
+
+          # SOF firmware for Apollo Lake (Intel-signed, SOF v2.2), pinned by tag + hash
+          $fwUrl = 'https://raw.githubusercontent.com/thesofproject/sof-bin/v2026.09.2/v2.2.x/sof-v2.2/intel-signed/sof-apl.ri'
+          $fwSha = 'D63499833BB20352E63907E2409F8246DF278A15CF7C73A24AEEFAFF19FB1A43'
+          New-Item -ItemType Directory -Force (Join-Path $out 'sofapl') | Out-Null
+          $fw = Join-Path $out 'sofapl\intel-sof-apl.ri'
+          Invoke-WebRequest $fwUrl -OutFile $fw
+          $got = (Get-FileHash $fw -Algorithm SHA256).Hash
+          if ($got -ne $fwSha) { throw "Firmware hash mismatch: $got" }
+          Invoke-WebRequest 'https://raw.githubusercontent.com/thesofproject/sof-bin/v2026.09.2/LICENCE.Intel' -OutFile (Join-Path $out 'sofapl\LICENCE.Intel.txt')
+
+          foreach ($name in 'sklhdaudbus','da7219','sofapl') {
             $sys = Get-ChildItem -Recurse -Filter "$name.sys" | Where-Object FullName -match 'Release' | Select-Object -First 1
             if (-not $sys) { throw "$name.sys not found" }
             # Prefer the stamped INF that the build put next to the .sys
