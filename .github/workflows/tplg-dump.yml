@@ -1,0 +1,38 @@
+name: tplg-dump
+
+# Decodes the SOF topology used by Linux for this board into text, so the
+# pipeline/DAI parameters can be mirrored in the Windows driver.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/tplg-dump.yml
+
+permissions:
+  contents: write
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decode topology
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq alsa-utils
+          mkdir out
+          base=https://raw.githubusercontent.com/thesofproject/sof-bin/v2026.09.2/v2.2.x/sof-tplg-v2.2.1
+          curl -sfL "$base/sof-apl-da7219.tplg" -o out/sof-apl-da7219.tplg
+          sha256sum out/sof-apl-da7219.tplg | tee out/sha256.txt
+          alsatplg --version | tee out/alsatplg-version.txt || true
+          alsatplg -d out/sof-apl-da7219.tplg -o out/sof-apl-da7219.conf 2>&1 | tee out/decode.log
+          curl -sfL https://raw.githubusercontent.com/thesofproject/sof/stable-v2.2/tools/topology/topology1/m4/sof/tokens.m4 -o out/tokens.m4 || true
+          ls -l out
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd out && zip -q ../tplg-dump.zip * && cd ..
+          gh release delete tplg-dump --yes --cleanup-tag -R "$GITHUB_REPOSITORY" 2>/dev/null || true
+          gh release create tplg-dump tplg-dump.zip --prerelease --target "$GITHUB_SHA" -R "$GITHUB_REPOSITORY" \
+            --title "Topology dump" --notes "Decoded sof-apl-da7219.tplg (reference only)."
