@@ -499,6 +499,7 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
         ULONG msg = v & HIPCT_MSG_MASK;
         ULONG msgExt = DspRead(ctx, DSP_REG_HIPCTE);
         SOF_IPC_FW_READY_MSG ready;
+        RtlZeroMemory(&ready, sizeof(ready));
         PUINT8 src = ctx->DspBar.Base.baseptr + MBOX_UPLINK_OFFSET;
         for (ULONG i = 0; i < sizeof(ready); i += 4) {
             *(PULONG)((PUINT8)&ready + i) = READ_REGISTER_ULONG((PULONG)(src + i));
