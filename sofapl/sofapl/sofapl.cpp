@@ -20,6 +20,7 @@
 
 #include "adsp_iface.h"
 #include "sof_regs.h"
+#include "..\..\include\sofapl_iface.h"
 
 #define SOFAPL_POOL_TAG 'LPAS'
 #define FW_PATH L"\\SystemRoot\\System32\\drivers\\intel-sof-apl.ri"
@@ -90,6 +91,12 @@ static void LogLine(PDEVICE_CONTEXT ctx, _Printf_format_string_ PCWSTR fmt, ...)
         return;
     }
     DbgPrintEx(DPFLTR_IHVAUDIO_ID, DPFLTR_ERROR_LEVEL, "sofapl: %ws\n", line);
+    // keep the most recent activity once the buffer fills up
+    size_t used = 0;
+    RtlStringCchLengthW(ctx->Log, LOG_CHARS, &used);
+    if (used + 300 >= LOG_CHARS) {
+        RtlStringCchCopyW(ctx->Log, LOG_CHARS, L"(earlier log lines dropped)\r\n");
+    }
     RtlStringCchCatW(ctx->Log, LOG_CHARS, line);
     RtlStringCchCatW(ctx->Log, LOG_CHARS, L"\r\n");
 }
@@ -1249,7 +1256,7 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     ctx->Log[0] = L'\0';
-    LogLine(ctx, L"sofapl 0.4.0 starting (milestone 3b-1: silence stream self-test)");
+    LogLine(ctx, L"sofapl 0.5.0 starting (milestone 3b-2: speaker child device for sofaudio)");
 
     NTSTATUS st = WdfFdoQueryForInterface(Device, &GUID_ADSP_BUS_INTERFACE,
         (PINTERFACE)&ctx->Bus, sizeof(ADSP_BUS_INTERFACE), 1, NULL);
@@ -1319,13 +1326,9 @@ NTSTATUS SofEvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE)
         LogLine(ctx, L"Speaker pipeline: %s (0x%08X), %u IPCs, %u notifications",
             stage, st, ctx->IpcCount, ctx->NotifyCount);
 
-        if (NT_SUCCESS(st)) {
-            // Milestone 3b-1: 1 second of all-zero samples (digital silence).
-            st = SilenceSelfTest(ctx);
-            stage = NT_SUCCESS(st) ? L"silence-test-passed" : L"silence-test-failed";
-            LogLine(ctx, L"Silence self-test: %s (0x%08X), %u IPCs, %u notifications",
-                stage, st, ctx->IpcCount, ctx->NotifyCount);
-        }
+        // (The 3b-1 SilenceSelfTest passed on hardware; it is no longer run at
+        //  boot. Streams are now opened by the audio driver through the
+        //  SOFAPL\Speaker child device.)
     }
     SaveRegistry(ctx, stage, st);
 
@@ -1362,6 +1365,114 @@ NTSTATUS SofEvtD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE)
     return STATUS_SUCCESS;
 }
 
+// ---------------------------------------------------------------------------
+// SOFAPL\Speaker child device + interface for the audio driver
+// ---------------------------------------------------------------------------
+
+// Never let the audio driver drive the speaker above -6 dB in the DSP.
+#define SPK_MAX_GAIN 32768u
+
+static NTSTATUS IfStreamOpen(PVOID Context, PHYSICAL_ADDRESS BufferPhys, ULONG BufferSize, ULONG PeriodBytes)
+{
+    PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Context;
+    if (!ctx->FwRunning || !ctx->SpeakerPipelineReady) return STATUS_DEVICE_NOT_READY;
+    if (BufferPhys.HighPart != 0) return STATUS_INVALID_PARAMETER;
+    NTSTATUS st = SpkStreamOpen(ctx, BufferPhys, BufferSize, PeriodBytes);
+    SaveRegistry(ctx, NT_SUCCESS(st) ? L"stream-open" : L"stream-open-failed", st);
+    return st;
+}
+
+static NTSTATUS IfStreamTrigger(PVOID Context, BOOLEAN Start)
+{
+    PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Context;
+    if (!ctx->FwRunning) return STATUS_DEVICE_NOT_READY;
+    NTSTATUS st = SpkStreamTrigger(ctx, Start);
+    LogLine(ctx, L"Stream %s: 0x%08X, position %u", Start ? L"start" : L"stop", st, SpkStreamPosition(ctx));
+    SaveRegistry(ctx, Start ? L"stream-running" : L"stream-stopped", st);
+    return st;
+}
+
+static ULONG IfStreamPosition(PVOID Context)
+{
+    PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Context;
+    return SpkStreamPosition(ctx);
+}
+
+static VOID IfStreamClose(PVOID Context)
+{
+    PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Context;
+    if (ctx->FwRunning) {
+        SpkStreamClose(ctx);
+    } else {
+        SpkStreamRelease(ctx);
+        ctx->SpkRunning = FALSE;
+        ctx->SpkParamsSet = FALSE;
+    }
+    SaveRegistry(ctx, L"stream-closed", STATUS_SUCCESS);
+}
+
+static NTSTATUS IfSetVolume(PVOID Context, ULONG GainQ16)
+{
+    PDEVICE_CONTEXT ctx = (PDEVICE_CONTEXT)Context;
+    if (!ctx->FwRunning || !ctx->SpeakerPipelineReady) return STATUS_DEVICE_NOT_READY;
+    if (GainQ16 > SPK_MAX_GAIN) GainQ16 = SPK_MAX_GAIN;
+    return SetSpeakerVolume(ctx, GainQ16);
+}
+
+static NTSTATUS CreateSpeakerChild(WDFDEVICE parent, PDEVICE_CONTEXT ctx)
+{
+    PWDFDEVICE_INIT init = WdfPdoInitAllocate(parent);
+    if (!init) return STATUS_INSUFFICIENT_RESOURCES;
+
+    DECLARE_CONST_UNICODE_STRING(hwId, L"SOFAPL\\Speaker");
+    DECLARE_CONST_UNICODE_STRING(instId, L"0");
+    DECLARE_CONST_UNICODE_STRING(desc, L"Chromebook Speakers (SOF)");
+
+    NTSTATUS st = WdfPdoInitAssignDeviceID(init, &hwId);
+    if (NT_SUCCESS(st)) st = WdfPdoInitAddHardwareID(init, &hwId);
+    if (NT_SUCCESS(st)) st = WdfPdoInitAssignInstanceID(init, &instId);
+    if (NT_SUCCESS(st)) st = WdfPdoInitAddDeviceText(init, &desc, &desc, 0x409);
+    if (!NT_SUCCESS(st)) {
+        WdfDeviceInitFree(init);
+        return st;
+    }
+    WdfPdoInitSetDefaultLocale(init, 0x409);
+
+    WDFDEVICE child;
+    st = WdfDeviceCreate(&init, WDF_NO_OBJECT_ATTRIBUTES, &child);
+    if (!NT_SUCCESS(st)) {
+        // WdfDeviceCreate frees init on failure
+        return st;
+    }
+
+    SOFAPL_AUDIO_INTERFACE iface;
+    RtlZeroMemory(&iface, sizeof(iface));
+    iface.Size = sizeof(iface);
+    iface.Version = SOFAPL_AUDIO_INTERFACE_VERSION;
+    iface.Context = ctx;
+    iface.InterfaceReference = WdfDeviceInterfaceReferenceNoOp;
+    iface.InterfaceDereference = WdfDeviceInterfaceDereferenceNoOp;
+    iface.StreamOpen = IfStreamOpen;
+    iface.StreamTrigger = IfStreamTrigger;
+    iface.StreamPosition = IfStreamPosition;
+    iface.StreamClose = IfStreamClose;
+    iface.SetVolume = IfSetVolume;
+
+    WDF_QUERY_INTERFACE_CONFIG qic;
+    WDF_QUERY_INTERFACE_CONFIG_INIT(&qic, (PINTERFACE)&iface, &GUID_SOFAPL_AUDIO_INTERFACE, NULL);
+    st = WdfDeviceAddQueryInterface(child, &qic);
+    if (!NT_SUCCESS(st)) {
+        WdfObjectDelete(child);
+        return st;
+    }
+
+    st = WdfFdoAddStaticChild(parent, child);
+    if (!NT_SUCCESS(st)) {
+        WdfObjectDelete(child);
+    }
+    return st;
+}
+
 NTSTATUS SofEvtDeviceAdd(WDFDRIVER, PWDFDEVICE_INIT DeviceInit)
 {
     WDF_PNPPOWER_EVENT_CALLBACKS pnp;
@@ -1382,6 +1493,13 @@ NTSTATUS SofEvtDeviceAdd(WDFDRIVER, PWDFDEVICE_INIT DeviceInit)
     PDEVICE_CONTEXT ctx = GetDeviceContext(device);
     ctx->Device = device;
     ExInitializeFastMutex(&ctx->IpcLock);
+
+    // Child device for the Windows audio driver. Failure here is not fatal for
+    // the DSP itself, so only log it.
+    st = CreateSpeakerChild(device, ctx);
+    if (!NT_SUCCESS(st)) {
+        LogLine(ctx, L"Creating SOFAPL\\Speaker child failed: 0x%08X", st);
+    }
     return STATUS_SUCCESS;
 }
 

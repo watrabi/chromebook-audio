@@ -45,7 +45,11 @@ jobs:
           $projects = @(
             'sklhdaudbus\sklhdaudbus\sklhdaudbus.vcxproj',
             'da7219\da7219\da7219.vcxproj',
-            'sofapl\sofapl\sofapl.vcxproj'
+            'sofapl\sofapl\sofapl.vcxproj',
+            # sofaudio (adapted Microsoft SimpleAudioSample): libs first, then the driver
+            'sofaudio\Source\Utilities\Utilities.vcxproj',
+            'sofaudio\Source\Filters\Filters.vcxproj',
+            'sofaudio\Source\Main\Main.vcxproj'
           )
           foreach ($p in $projects) {
             Write-Host "=== Building $p"
@@ -79,12 +83,21 @@ jobs:
           if ($got -ne $fwSha) { throw "Firmware hash mismatch: $got" }
           Invoke-WebRequest 'https://raw.githubusercontent.com/thesofproject/sof-bin/v2026.09.2/LICENCE.Intel' -OutFile (Join-Path $out 'sofapl\LICENCE.Intel.txt')
 
-          foreach ($name in 'sklhdaudbus','da7219','sofapl') {
-            $sys = Get-ChildItem -Recurse -Filter "$name.sys" | Where-Object FullName -match 'Release' | Select-Object -First 1
-            if (-not $sys) { throw "$name.sys not found" }
+          # package folder -> binary/INF base name
+          $packages = [ordered]@{
+            'sklhdaudbus' = 'sklhdaudbus'
+            'da7219'      = 'da7219'
+            'sofapl'      = 'sofapl'
+            'sofaudio'    = 'SimpleAudioSample'
+          }
+          foreach ($name in $packages.Keys) {
+            $base = $packages[$name]
+            $sys = Get-ChildItem -Recurse -Filter "$base.sys" | Where-Object { $_.FullName -match 'Release' -and $_.FullName -notmatch '\\out\\' } | Select-Object -First 1
+            if (-not $sys) { throw "$base.sys not found" }
             # Prefer the stamped INF that the build put next to the .sys
-            $inf = Get-ChildItem $sys.DirectoryName -Recurse -Filter "$name.inf" | Select-Object -First 1
-            if (-not $inf) { $inf = Get-ChildItem -Recurse -Filter "$name.inf" | Where-Object FullName -notmatch '\\out\\' | Select-Object -First 1 }
+            $inf = Get-ChildItem $sys.DirectoryName -Recurse -Filter "$base.inf" | Select-Object -First 1
+            if (-not $inf) { $inf = Get-ChildItem -Recurse -Filter "$base.inf" | Where-Object FullName -notmatch '\\out\\' | Select-Object -First 1 }
+            if (-not $inf) { throw "$base.inf not found" }
             $dest = Join-Path $out $name
             New-Item -ItemType Directory -Force $dest | Out-Null
             Copy-Item $sys.FullName, $inf.FullName $dest
