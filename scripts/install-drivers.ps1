@@ -18,6 +18,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# "powershell -File ... -Drivers a,b" passes one string "a,b"; split it.
+$Drivers = @($Drivers | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+Write-Host "Drivers to install (in order): $($Drivers -join ', ')"
+
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run this script from an Administrator PowerShell.'
