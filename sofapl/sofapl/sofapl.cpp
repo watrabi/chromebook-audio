@@ -24,7 +24,7 @@
 #define SOFAPL_POOL_TAG 'LPAS'
 #define FW_PATH L"\\SystemRoot\\System32\\drivers\\intel-sof-apl.ri"
 #define FW_MAX_SIZE (4 * 1024 * 1024)
-#define LOG_CHARS 4096
+#define LOG_CHARS 8192
 
 typedef struct _DEVICE_CONTEXT {
     WDFDEVICE Device;
@@ -42,6 +42,16 @@ typedef struct _DEVICE_CONTEXT {
 
     BOOLEAN PowerHeld;
     BOOLEAN FwRunning;
+
+    // IPC mailboxes (offsets in the DSP BAR), from the FW_READY window info
+    ULONG HostBoxOff;   // host -> DSP ("downbox")
+    ULONG HostBoxSize;
+    ULONG DspBoxOff;    // DSP -> host ("upbox")
+    ULONG DspBoxSize;
+    ULONG IpcCount;
+    ULONG NotifyCount;
+
+    BOOLEAN SpeakerPipelineReady;
 
     WCHAR Log[LOG_CHARS];
 } DEVICE_CONTEXT, * PDEVICE_CONTEXT;
@@ -270,6 +280,352 @@ static NTSTATUS LoadFirmwareFile(PDEVICE_CONTEXT ctx)
         LogLine(ctx, L"Reading firmware failed: 0x%08X", st);
     }
     return st;
+}
+
+// ---------------------------------------------------------------------------
+// Mailbox access and IPC3 (polling mode)
+// ---------------------------------------------------------------------------
+
+static void MboxRead(PDEVICE_CONTEXT ctx, ULONG off, PVOID buf, ULONG len)
+{
+    PUINT8 dst = (PUINT8)buf;
+    for (ULONG i = 0; i < len; i += 4) {
+        ULONG v = READ_REGISTER_ULONG((PULONG)(ctx->DspBar.Base.baseptr + off + i));
+        ULONG n = min(4u, len - i);
+        RtlCopyMemory(dst + i, &v, n);
+    }
+}
+
+static void MboxWrite(PDEVICE_CONTEXT ctx, ULONG off, const VOID* buf, ULONG len)
+{
+    const UINT8* src = (const UINT8*)buf;
+    for (ULONG i = 0; i < len; i += 4) {
+        ULONG v = 0;
+        ULONG n = min(4u, len - i);
+        RtlCopyMemory(&v, src + i, n);
+        WRITE_REGISTER_ULONG((PULONG)(ctx->DspBar.Base.baseptr + off + i), v);
+    }
+}
+
+// Parse the extended data that follows FW_READY (ipc3_fw_parse_ext_data)
+// to find the IPC mailbox windows.
+static void ParseExtData(PDEVICE_CONTEXT ctx, ULONG offset)
+{
+    for (int guard = 0; guard < 16; guard++) {
+        if (offset + sizeof(SOF_IPC_EXT_DATA_HDR) > ctx->DspBar.Len) break;
+        SOF_IPC_EXT_DATA_HDR eh;
+        MboxRead(ctx, offset, &eh, sizeof(eh));
+        if (eh.hdr.cmd != SOF_IPC_FW_READY || eh.hdr.size < sizeof(eh) || eh.hdr.size > 4096) {
+            break;
+        }
+        LogLine(ctx, L"  ext data type %u, %u bytes", eh.type, eh.hdr.size);
+
+        if (eh.type == SOF_IPC_EXT_WINDOW) {
+            UINT32 num = 0;
+            MboxRead(ctx, offset + sizeof(eh), &num, sizeof(num));
+            for (UINT32 i = 0; i < num && i < 15; i++) {
+                ULONG eoff = offset + sizeof(eh) + 4 + i * sizeof(SOF_IPC_WINDOW_ELEM);
+                if (eoff + sizeof(SOF_IPC_WINDOW_ELEM) > offset + eh.hdr.size) break;
+                SOF_IPC_WINDOW_ELEM w;
+                MboxRead(ctx, eoff, &w, sizeof(w));
+                ULONG abs = SRAM_WINDOW_OFFSET(w.id) + w.offset;
+                LogLine(ctx, L"    window type %u id %u offset 0x%X size 0x%X -> BAR 0x%X",
+                    w.type, w.id, w.offset, w.size, abs);
+                if (abs + w.size > ctx->DspBar.Len) continue;
+                if (w.type == SOF_IPC_REGION_DOWNBOX) {
+                    ctx->HostBoxOff = abs;
+                    ctx->HostBoxSize = w.size;
+                } else if (w.type == SOF_IPC_REGION_UPBOX) {
+                    ctx->DspBoxOff = abs;
+                    ctx->DspBoxSize = w.size;
+                }
+            }
+        }
+        offset += eh.hdr.size;
+    }
+    LogLine(ctx, L"IPC mailboxes: host->DSP 0x%X (%u bytes), DSP->host 0x%X (%u bytes)",
+        ctx->HostBoxOff, ctx->HostBoxSize, ctx->DspBoxOff, ctx->DspBoxSize);
+}
+
+// Acknowledge any DSP-initiated message (notifications, trace, position).
+static void IpcServiceNotifications(PDEVICE_CONTEXT ctx)
+{
+    ULONG hipct = DspRead(ctx, DSP_REG_HIPCT);
+    if (!(hipct & HIPCT_BUSY)) return;
+
+    SOF_IPC_CMD_HDR hdr = { 0 };
+    if (ctx->DspBoxSize >= sizeof(hdr)) {
+        MboxRead(ctx, ctx->DspBoxOff, &hdr, sizeof(hdr));
+    }
+    ctx->NotifyCount++;
+    if (ctx->NotifyCount <= 8) {
+        LogLine(ctx, L"  DSP notification: HIPCT=0x%08X cmd=0x%08X size=%u",
+            hipct & HIPCT_MSG_MASK, hdr.cmd, hdr.size);
+    }
+    DspUpdate(ctx, DSP_REG_HIPCT, HIPCT_BUSY, HIPCT_BUSY);
+}
+
+// Send one IPC3 message and wait (polling) for the reply.
+// Returns STATUS_SUCCESS only if the firmware replied with error == 0.
+static NTSTATUS IpcTx(PDEVICE_CONTEXT ctx, PCWSTR what, const VOID* msg, ULONG size,
+    PVOID reply, ULONG replySize)
+{
+    const SOF_IPC_CMD_HDR* hdr = (const SOF_IPC_CMD_HDR*)msg;
+    if (!ctx->FwRunning || !ctx->HostBoxSize) return STATUS_DEVICE_NOT_READY;
+    if (size > ctx->HostBoxSize || hdr->size != size) {
+        LogLine(ctx, L"IPC %s: bad size %u (hdr %u, box %u)", what, size, hdr->size, ctx->HostBoxSize);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    IpcServiceNotifications(ctx);
+
+    // previous message must have been consumed
+    NTSTATUS st = DspPoll(ctx, DSP_REG_HIPCI, HIPCI_BUSY, 0, 10000, NULL);
+    if (!NT_SUCCESS(st)) {
+        LogLine(ctx, L"IPC %s: HIPCI still busy", what);
+        return STATUS_DEVICE_BUSY;
+    }
+
+    MboxWrite(ctx, ctx->HostBoxOff, msg, size);
+    KeMemoryBarrier();
+    DspWrite(ctx, DSP_REG_HIPCI, (hdr->cmd & 0x7FFFFFFFu) | HIPCI_BUSY);
+    ctx->IpcCount++;
+
+    ULONG v = 0;
+    st = DspPoll(ctx, DSP_REG_HIPCIE, HIPCIE_DONE, HIPCIE_DONE, 500000, &v);
+    if (!NT_SUCCESS(st)) {
+        LogLine(ctx, L"IPC %s (cmd 0x%08X): reply timeout, HIPCI=0x%08X HIPCIE=0x%08X",
+            what, hdr->cmd, DspRead(ctx, DSP_REG_HIPCI), v);
+        IpcServiceNotifications(ctx);
+        return STATUS_IO_TIMEOUT;
+    }
+
+    SOF_IPC_REPLY r;
+    MboxRead(ctx, ctx->HostBoxOff, &r, sizeof(r));
+    if (reply && replySize) {
+        ULONG n = min(replySize, (ULONG)min(r.hdr.size, ctx->HostBoxSize));
+        MboxRead(ctx, ctx->HostBoxOff, reply, n);
+    }
+
+    // acknowledge the reply (set DONE to clear it)
+    DspUpdate(ctx, DSP_REG_HIPCIE, HIPCIE_DONE, HIPCIE_DONE);
+
+    IpcServiceNotifications(ctx);
+
+    LogLine(ctx, L"IPC %s: reply error %d", what, r.error);
+    return (r.error == 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+}
+
+// ---------------------------------------------------------------------------
+// Speaker pipeline (pipeline 1 of sof-apl-da7219.tplg):
+//   PCM0P (host) -> BUF1.0 -> PGA1.0 (volume) -> BUF1.1 -> SSP5.OUT (MAX98357A)
+// Values come from the decoded Linux topology (see README).
+// ---------------------------------------------------------------------------
+
+#define SPK_PIPE_ID     1
+#define SPK_COMP_HOST   1
+#define SPK_COMP_BUF0   2
+#define SPK_COMP_PGA    3
+#define SPK_COMP_BUF1   4
+#define SPK_COMP_DAI    5
+#define SPK_COMP_PIPE   6
+
+// Start the speaker volume very low: -40 dB (Q1.16 gain ~= 655)
+#define SPK_INITIAL_GAIN 655u
+
+static const UINT8 UUID_HOST[16] = { 0x0c,0x10,0x9d,0x8b,0x78,0x6d,0x8f,0x41,0x90,0xa3,0xe0,0xe8,0x05,0xd0,0x85,0x2b };
+static const UINT8 UUID_PGA[16]  = { 0x7e,0x67,0x7e,0xb7,0xf4,0x5f,0x88,0x41,0xaf,0x14,0xfb,0xa8,0xbd,0xbf,0x86,0x82 };
+static const UINT8 UUID_DAI[16]  = { 0x27,0x0d,0xb0,0xc2,0xbc,0xff,0x50,0x41,0xa5,0x1a,0x24,0x5c,0x79,0xc5,0xe5,0x4b };
+
+static void InitComp(SOF_IPC_COMP* c, ULONG totalSize, ULONG id, ULONG type, BOOLEAN hasUuid)
+{
+    c->hdr.size = totalSize;
+    c->hdr.cmd = SOF_IPC_GLB_TPLG_MSG | SOF_IPC_TPLG_COMP_NEW;
+    c->id = id;
+    c->type = type;
+    c->pipeline_id = SPK_PIPE_ID;
+    c->core = 0;
+    c->ext_data_length = hasUuid ? sizeof(SOF_IPC_COMP_EXT) : 0;
+}
+
+static NTSTATUS IpcConnect(PDEVICE_CONTEXT ctx, ULONG src, ULONG sink)
+{
+    SOF_IPC_PIPE_COMP_CONNECT m;
+    RtlZeroMemory(&m, sizeof(m));
+    m.hdr.size = sizeof(m);
+    m.hdr.cmd = SOF_IPC_GLB_TPLG_MSG | SOF_IPC_TPLG_COMP_CONNECT;
+    m.source_id = src;
+    m.sink_id = sink;
+    WCHAR what[32];
+    RtlStringCchPrintfW(what, ARRAYSIZE(what), L"connect %u->%u", src, sink);
+    return IpcTx(ctx, what, &m, sizeof(m), NULL, 0);
+}
+
+static NTSTATUS SetSpeakerVolume(PDEVICE_CONTEXT ctx, ULONG gainQ16)
+{
+    SOF_IPC_CTRL_DATA_2CH m;
+    RtlZeroMemory(&m, sizeof(m));
+    m.rhdr.hdr.size = sizeof(m);
+    m.rhdr.hdr.cmd = SOF_IPC_GLB_COMP_MSG | SOF_IPC_COMP_SET_VALUE;
+    m.comp_id = SPK_COMP_PGA;
+    m.type = SOF_CTRL_TYPE_VALUE_CHAN_SET;
+    m.cmd = SOF_CTRL_CMD_VOLUME;
+    m.index = 0;
+    m.num_elems = 2;
+    for (UINT32 i = 0; i < 2; i++) {
+        m.chanv[i].channel = i;
+        m.chanv[i].value = gainQ16;
+    }
+    return IpcTx(ctx, L"set volume", &m, sizeof(m), NULL, 0);
+}
+
+// Creates the pipeline in the firmware. Nothing is started: no PCM params,
+// no trigger, SSP clocks are not requested (clks_control = 0).
+static NTSTATUS SetupSpeakerPipeline(PDEVICE_CONTEXT ctx)
+{
+    NTSTATUS st;
+
+    // 1. pipeline, scheduled by the DAI component
+    {
+        SOF_IPC_PIPE_NEW m;
+        RtlZeroMemory(&m, sizeof(m));
+        m.hdr.size = sizeof(m);
+        m.hdr.cmd = SOF_IPC_GLB_TPLG_MSG | SOF_IPC_TPLG_PIPE_NEW;
+        m.comp_id = SPK_COMP_PIPE;
+        m.pipeline_id = SPK_PIPE_ID;
+        m.sched_id = SPK_COMP_DAI;
+        m.core = 0;
+        m.period = 1000;
+        m.priority = 0;
+        m.period_mips = 5000;
+        m.frames_per_sched = 0;
+        m.xrun_limit_usecs = 0;
+        m.time_domain = SOF_TIME_DOMAIN_TIMER;
+        st = IpcTx(ctx, L"pipe new", &m, sizeof(m), NULL, 0);
+        if (!NT_SUCCESS(st)) return st;
+    }
+
+    // 2. host component (PCM0P)
+    {
+        SOF_IPC_COMP_HOST m;
+        RtlZeroMemory(&m, sizeof(m));
+        InitComp(&m.comp, sizeof(m), SPK_COMP_HOST, SOF_COMP_HOST, TRUE);
+        m.config.hdr.size = sizeof(m.config);
+        m.config.periods_sink = 2;
+        m.config.periods_source = 0;
+        m.config.frame_fmt = SOF_IPC_FRAME_S16_LE;   // no format token: 0
+        m.direction = SOF_IPC_STREAM_PLAYBACK;
+        RtlCopyMemory(m.ext.uuid, UUID_HOST, 16);
+        st = IpcTx(ctx, L"host comp", &m, sizeof(m), NULL, 0);
+        if (!NT_SUCCESS(st)) return st;
+    }
+
+    // 3. buffers
+    for (ULONG id = SPK_COMP_BUF0; id <= SPK_COMP_BUF1; id += (SPK_COMP_BUF1 - SPK_COMP_BUF0)) {
+        SOF_IPC_BUFFER m;
+        RtlZeroMemory(&m, sizeof(m));
+        m.comp.hdr.size = sizeof(m);
+        m.comp.hdr.cmd = SOF_IPC_GLB_TPLG_MSG | SOF_IPC_TPLG_BUFFER_NEW;
+        m.comp.id = id;
+        m.comp.type = SOF_COMP_BUFFER;
+        m.comp.pipeline_id = SPK_PIPE_ID;
+        m.comp.core = 0;
+        m.size = 768;
+        m.caps = 113;   // RAM | HP | DMA | CACHE
+        st = IpcTx(ctx, (id == SPK_COMP_BUF0) ? L"buffer 1.0" : L"buffer 1.1", &m, sizeof(m), NULL, 0);
+        if (!NT_SUCCESS(st)) return st;
+    }
+
+    // 4. volume (PGA1.0)
+    {
+        SOF_IPC_COMP_VOLUME m;
+        RtlZeroMemory(&m, sizeof(m));
+        InitComp(&m.comp, sizeof(m), SPK_COMP_PGA, SOF_COMP_VOLUME, TRUE);
+        m.config.hdr.size = sizeof(m.config);
+        m.config.periods_sink = 2;
+        m.config.periods_source = 2;
+        m.config.frame_fmt = SOF_IPC_FRAME_S32_LE;
+        m.channels = 2;
+        m.min_value = 0;
+        m.max_value = SOF_VOL_0DB;
+        m.ramp = SOF_VOLUME_LINEAR_ZC;
+        m.initial_ramp = 20;
+        RtlCopyMemory(m.ext.uuid, UUID_PGA, 16);
+        st = IpcTx(ctx, L"volume comp", &m, sizeof(m), NULL, 0);
+        if (!NT_SUCCESS(st)) return st;
+    }
+
+    // 5. DAI component (SSP5, playback)
+    {
+        SOF_IPC_COMP_DAI m;
+        RtlZeroMemory(&m, sizeof(m));
+        InitComp(&m.comp, sizeof(m), SPK_COMP_DAI, SOF_COMP_DAI, TRUE);
+        m.config.hdr.size = sizeof(m.config);
+        m.config.periods_sink = 0;
+        m.config.periods_source = 2;
+        m.config.frame_fmt = SOF_IPC_FRAME_S16_LE;
+        m.direction = SOF_IPC_STREAM_PLAYBACK;
+        m.dai_index = 5;
+        m.type = SOF_DAI_INTEL_SSP;
+        RtlCopyMemory(m.ext.uuid, UUID_DAI, 16);
+        st = IpcTx(ctx, L"SSP5 dai comp", &m, sizeof(m), NULL, 0);
+        if (!NT_SUCCESS(st)) return st;
+    }
+
+    // 6. graph
+    if (!NT_SUCCESS(st = IpcConnect(ctx, SPK_COMP_HOST, SPK_COMP_BUF0))) return st;
+    if (!NT_SUCCESS(st = IpcConnect(ctx, SPK_COMP_BUF0, SPK_COMP_PGA))) return st;
+    if (!NT_SUCCESS(st = IpcConnect(ctx, SPK_COMP_PGA, SPK_COMP_BUF1))) return st;
+    if (!NT_SUCCESS(st = IpcConnect(ctx, SPK_COMP_BUF1, SPK_COMP_DAI))) return st;
+
+    // 7. pipeline complete
+    {
+        SOF_IPC_PIPE_READY m;
+        RtlZeroMemory(&m, sizeof(m));
+        m.hdr.size = sizeof(m);
+        m.hdr.cmd = SOF_IPC_GLB_TPLG_MSG | SOF_IPC_TPLG_PIPE_COMPLETE;
+        m.comp_id = SPK_COMP_PIPE;
+        st = IpcTx(ctx, L"pipe complete", &m, sizeof(m), NULL, 0);
+        if (!NT_SUCCESS(st)) return st;
+    }
+
+    // 8. low volume before anything can ever play
+    st = SetSpeakerVolume(ctx, SPK_INITIAL_GAIN);
+    if (!NT_SUCCESS(st)) return st;
+
+    // 9. SSP5 configuration (I2S, SSP provides BCLK/FSYNC, 19.2 MHz MCLK,
+    //    1.536 MHz BCLK, 2 x 16-bit slots). clks_control = 0: no early clocks.
+    {
+        SOF_IPC_DAI_CONFIG m;
+        RtlZeroMemory(&m, sizeof(m));
+        m.hdr.size = sizeof(m);
+        m.hdr.cmd = SOF_IPC_GLB_DAI_MSG | SOF_IPC_DAI_CONFIG;
+        m.type = SOF_DAI_INTEL_SSP;
+        m.dai_index = 5;
+        m.format = SOF_DAI_FMT_I2S | SOF_DAI_FMT_NB_NF | SOF_DAI_FMT_CBC_CFC;
+        m.group_id = 0;
+        m.flags = SOF_DAI_CONFIG_FLAGS_HW_PARAMS;
+        m.ssp.mclk_id = 0;
+        m.ssp.mclk_rate = 19200000;
+        m.ssp.fsync_rate = 48000;
+        m.ssp.bclk_rate = 1536000;
+        m.ssp.tdm_slots = 2;
+        m.ssp.rx_slots = 3;
+        m.ssp.tx_slots = 3;
+        m.ssp.sample_valid_bits = 16;
+        m.ssp.tdm_slot_width = 16;
+        m.ssp.mclk_direction = 1;   // codec MCLK in
+        m.ssp.frame_pulse_width = 0;
+        m.ssp.tdm_per_slot_padding_flag = 0;
+        m.ssp.clks_control = 0;
+        m.ssp.quirks = 0;
+        m.ssp.bclk_delay = 0;
+        st = IpcTx(ctx, L"SSP5 dai config", &m, sizeof(m), NULL, 0);
+        if (!NT_SUCCESS(st)) return st;
+    }
+
+    ctx->SpeakerPipelineReady = TRUE;
+    return STATUS_SUCCESS;
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +881,7 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
             msg, msgExt, ready.hdr.cmd, ready.hdr.size);
 
         if ((ready.hdr.cmd & SOF_GLB_TYPE_MASK) == SOF_IPC_FW_READY) {
+            ParseExtData(ctx, MBOX_UPLINK_OFFSET + sizeof(SOF_IPC_FW_READY_MSG));
             CHAR tagStr[7] = { 0 };
             RtlCopyMemory(tagStr, ready.version.tag, 6);
             LogLine(ctx, L"FW_READY: SOF %u.%u.%u build %u tag '%S' ABI 0x%08X",
@@ -532,8 +889,11 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
                 ready.version.build, tagStr, ready.version.abi_version);
             LogLine(ctx, L"Mailboxes: dspbox 0x%X (%u bytes), hostbox 0x%X (%u bytes)",
                 ready.dspbox_offset, ready.dspbox_size, ready.hostbox_offset, ready.hostbox_size);
-            ctx->FwRunning = TRUE;
-            st = STATUS_SUCCESS;
+            ctx->FwRunning = (ctx->HostBoxSize != 0 && ctx->DspBoxSize != 0);
+            st = ctx->FwRunning ? STATUS_SUCCESS : STATUS_DEVICE_CONFIGURATION_ERROR;
+            if (!ctx->FwRunning) {
+                LogLine(ctx, L"No IPC mailbox windows found in FW_READY ext data");
+            }
         } else {
             LogLine(ctx, L"First DSP message was not FW_READY");
             st = STATUS_UNEXPECTED_IO_ERROR;
@@ -570,7 +930,7 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     ctx->Log[0] = L'\0';
-    LogLine(ctx, L"sofapl milestone 2 driver starting (build 2: SPIB)");
+    LogLine(ctx, L"sofapl 0.3.0 starting (milestone 3a: IPC + speaker pipeline, silent)");
 
     NTSTATUS st = WdfFdoQueryForInterface(Device, &GUID_ADSP_BUS_INTERFACE,
         (PINTERFACE)&ctx->Bus, sizeof(ADSP_BUS_INTERFACE), 1, NULL);
@@ -631,6 +991,15 @@ NTSTATUS SofEvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE)
     PCWSTR stage = L"start";
     st = SofBootFirmware(ctx, &stage);
     LogLine(ctx, L"Boot result: %s (0x%08X)", stage, st);
+
+    if (NT_SUCCESS(st) && ctx->FwRunning) {
+        // Milestone 3a: build the speaker pipeline in the firmware. Silent:
+        // no stream parameters and no trigger are ever sent here.
+        st = SetupSpeakerPipeline(ctx);
+        stage = NT_SUCCESS(st) ? L"speaker-pipeline-ready" : L"speaker-pipeline-failed";
+        LogLine(ctx, L"Speaker pipeline: %s (0x%08X), %u IPCs, %u notifications",
+            stage, st, ctx->IpcCount, ctx->NotifyCount);
+    }
     SaveRegistry(ctx, stage, st);
 
     // Never fail D0 entry for a DSP boot problem: keep the device started so
@@ -647,6 +1016,9 @@ NTSTATUS SofEvtD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE)
         CoreResetPowerDown(ctx, APL_CORE_MASK_ALL);
     }
     ctx->FwRunning = FALSE;
+    ctx->SpeakerPipelineReady = FALSE;
+    ctx->HostBoxOff = ctx->HostBoxSize = 0;
+    ctx->DspBoxOff = ctx->DspBoxSize = 0;
 
     if (ctx->PowerHeld) {
         ctx->Bus.SetDSPPowerState(ctx->Bus.Context, PowerDeviceD3);
