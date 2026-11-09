@@ -29,8 +29,14 @@ jobs:
         run: |
           $t = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\build\*\WindowsDriver.common.targets' | Sort-Object FullName -Descending | Select-Object -First 1
           Write-Host "::notice::targets file: $($t.FullName)"
-          Select-String -Path $t.FullName -Pattern 'InfVerif' | Select-Object -First 25 | ForEach-Object {
-            Write-Host ("::notice::L{0}: {1}" -f $_.LineNumber, $_.Line.Trim())
+          $lines = Get-Content $t.FullName
+          $show = @()
+          $show += 655..672
+          $hits = Select-String -Path $t.FullName -Pattern 'Name="Inf2Cat|Inf2CatEnabled|EnableInf2cat|Name="StampInf|RunInfVerif|EnableInfVerif' | ForEach-Object { $_.LineNumber }
+          foreach ($n in $hits) { $show += ($n-2)..($n+3) }
+          $show | Sort-Object -Unique | Where-Object { $_ -ge 1 -and $_ -le $lines.Count } | ForEach-Object {
+            $txt = $lines[$_-1].Trim()
+            if ($txt) { Write-Host ("::notice::L{0}: {1}" -f $_, $txt) }
           }
           Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Tools' -Recurse -Filter 'InfVerif*' -ErrorAction SilentlyContinue |
             ForEach-Object { Write-Host "::notice::found $($_.FullName)" }
