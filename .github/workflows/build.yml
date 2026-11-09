@@ -34,8 +34,16 @@ jobs:
           )
           foreach ($p in $projects) {
             Write-Host "=== Building $p"
-            msbuild $p /m /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:SpectreMitigation=false /v:minimal
-            if ($LASTEXITCODE -ne 0) { throw "Build failed: $p" }
+            $log = Join-Path $env:RUNNER_TEMP ("build-" + [IO.Path]::GetFileNameWithoutExtension($p) + ".log")
+            msbuild $p /m /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:SpectreMitigation=false /v:minimal "/flp:logfile=$log;verbosity=normal"
+            $code = $LASTEXITCODE
+            # Surface compiler/linker/INF errors and warnings as annotations
+            Select-String -Path $log -Pattern ': (fatal )?error |: warning (C|LNK|INF|DRV|1)' |
+              Select-Object -ExpandProperty Line -Unique | Select-Object -First 40 | ForEach-Object {
+                $lvl = if ($_ -match ': (fatal )?error ') { 'error' } else { 'warning' }
+                Write-Host "::$lvl::$($_.Trim())"
+              }
+            if ($code -ne 0) { throw "Build failed: $p" }
           }
 
       - name: Collect packages and create catalogs
