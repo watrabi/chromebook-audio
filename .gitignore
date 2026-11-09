@@ -1,0 +1,7 @@
+x64/
+Win32/
+Debug/
+Release/
+.vs/
+*.user
+out/

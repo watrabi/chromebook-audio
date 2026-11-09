@@ -1,0 +1,62 @@
+name: build-drivers
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Check for Windows Driver Kit
+        shell: pwsh
+        run: |
+          $kits = 'C:\Program Files (x86)\Windows Kits\10'
+          Get-ChildItem "$kits\Include" | Select-Object -ExpandProperty Name
+          $wdm = Get-ChildItem "$kits\Include\*\km\wdm.h" -ErrorAction SilentlyContinue
+          if (-not $wdm) { throw 'WDK headers not found on runner' }
+          $wdm | Select-Object -ExpandProperty FullName
+
+      - name: Build drivers
+        shell: pwsh
+        run: |
+          $projects = @(
+            'sklhdaudbus\sklhdaudbus\sklhdaudbus.vcxproj',
+            'da7219\da7219\da7219.vcxproj'
+          )
+          foreach ($p in $projects) {
+            Write-Host "=== Building $p"
+            msbuild $p /m /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:SpectreMitigation=false /v:minimal
+            if ($LASTEXITCODE -ne 0) { throw "Build failed: $p" }
+          }
+
+      - name: Collect packages and create catalogs
+        shell: pwsh
+        run: |
+          $kits = 'C:\Program Files (x86)\Windows Kits\10'
+          $inf2cat = Get-ChildItem "$kits\bin\*\x86\Inf2Cat.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $inf2cat) { throw 'Inf2Cat not found' }
+          $out = Join-Path $PWD 'out'
+          foreach ($name in 'sklhdaudbus','da7219') {
+            $sys = Get-ChildItem -Recurse -Filter "$name.sys" | Where-Object FullName -match 'Release' | Select-Object -First 1
+            if (-not $sys) { throw "$name.sys not found" }
+            # Prefer the stamped INF that the build put next to the .sys
+            $inf = Get-ChildItem $sys.DirectoryName -Recurse -Filter "$name.inf" | Select-Object -First 1
+            if (-not $inf) { $inf = Get-ChildItem -Recurse -Filter "$name.inf" | Where-Object FullName -notmatch '\\out\\' | Select-Object -First 1 }
+            $dest = Join-Path $out $name
+            New-Item -ItemType Directory -Force $dest | Out-Null
+            Copy-Item $sys.FullName, $inf.FullName $dest
+            Write-Host "=== $name : $($sys.FullName) + $($inf.FullName)"
+            & $inf2cat.FullName /driver:$dest /os:10_X64 /uselocaltime
+            if ($LASTEXITCODE -ne 0) { throw "Inf2Cat failed for $name" }
+          }
+          Get-ChildItem -Recurse $out | Select-Object FullName, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drivers-unsigned
+          path: out/
