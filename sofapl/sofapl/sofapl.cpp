@@ -48,6 +48,7 @@ typedef struct _DEVICE_CONTEXT {
     ULONG HostBoxSize;
     ULONG DspBoxOff;    // DSP -> host ("upbox")
     ULONG DspBoxSize;
+    ULONG IpcMaxSize;   // from the extended manifest config data
     ULONG IpcCount;
     ULONG NotifyCount;
 
@@ -310,6 +311,60 @@ static void MboxWrite(PDEVICE_CONTEXT ctx, ULONG off, const VOID* buf, ULONG len
 // Parse the extended data that follows FW_READY (ipc3_fw_parse_ext_data)
 // to find the IPC mailbox windows.
 static void ParseExtChain(PDEVICE_CONTEXT ctx, ULONG offset);
+
+// SOF 1.6+ firmware describes its SRAM windows in the extended manifest at the
+// start of the .ri file (snd_sof_fw_ext_man_parse / SOF_EXT_MAN_ELEM_WINDOW).
+#define SOF_EXT_MAN_ELEM_WINDOW       1
+#define SOF_EXT_MAN_ELEM_CONFIG_DATA  5
+#define SOF_EXT_MAN_CONFIG_IPC_MSG_SIZE 1
+
+static void ParseFwExtManifest(PDEVICE_CONTEXT ctx, ULONG manSize)
+{
+    if (manSize < sizeof(SOF_EXT_MAN_HEADER) || manSize > ctx->FwFileSize) return;
+    const SOF_EXT_MAN_HEADER* mh = (const SOF_EXT_MAN_HEADER*)ctx->FwFile;
+    ULONG off = mh->header_size;
+    while (off + 8 <= manSize) {
+        UINT32 type = *(const UINT32*)(ctx->FwFile + off);
+        UINT32 size = *(const UINT32*)(ctx->FwFile + off + 4);
+        if (size < 8 || off + size > manSize) break;
+
+        if (type == SOF_EXT_MAN_ELEM_WINDOW && size >= 8 + sizeof(SOF_IPC_EXT_DATA_HDR) + 4) {
+            const UINT8* w = ctx->FwFile + off + 8;    // struct sof_ipc_window
+            UINT32 num = *(const UINT32*)(w + sizeof(SOF_IPC_EXT_DATA_HDR));
+            for (UINT32 i = 0; i < num && i < 15; i++) {
+                ULONG eoff = sizeof(SOF_IPC_EXT_DATA_HDR) + 4 + i * sizeof(SOF_IPC_WINDOW_ELEM);
+                if (8 + eoff + sizeof(SOF_IPC_WINDOW_ELEM) > size) break;
+                const SOF_IPC_WINDOW_ELEM* e = (const SOF_IPC_WINDOW_ELEM*)(w + eoff);
+                ULONG abs = SRAM_WINDOW_OFFSET(e->id) + e->offset;
+                LogLine(ctx, L"  manifest window type %u id %u offset 0x%X size 0x%X -> BAR 0x%X",
+                    e->type, e->id, e->offset, e->size, abs);
+                if (abs + e->size > ctx->DspBar.Len) continue;
+                if (e->type == SOF_IPC_REGION_DOWNBOX) {
+                    ctx->HostBoxOff = abs;
+                    ctx->HostBoxSize = e->size;
+                } else if (e->type == SOF_IPC_REGION_UPBOX) {
+                    ctx->DspBoxOff = abs;
+                    ctx->DspBoxSize = e->size;
+                }
+            }
+        } else if (type == SOF_EXT_MAN_ELEM_CONFIG_DATA) {
+            for (ULONG j = off + 8; j + 8 <= off + size; j += 8) {
+                UINT32 token = *(const UINT32*)(ctx->FwFile + j);
+                UINT32 value = *(const UINT32*)(ctx->FwFile + j + 4);
+                if (token == SOF_EXT_MAN_CONFIG_IPC_MSG_SIZE && value >= 64) {
+                    ctx->IpcMaxSize = value;
+                }
+            }
+        }
+        off += size;
+    }
+    // never write past what the firmware accepts as one message
+    if (ctx->IpcMaxSize && ctx->HostBoxSize > ctx->IpcMaxSize) {
+        ctx->HostBoxSize = ctx->IpcMaxSize;
+    }
+    LogLine(ctx, L"Manifest: host->DSP mailbox 0x%X (%u), DSP->host 0x%X (%u), max IPC %u",
+        ctx->HostBoxOff, ctx->HostBoxSize, ctx->DspBoxOff, ctx->DspBoxSize, ctx->IpcMaxSize);
+}
 
 static void DumpWords(PDEVICE_CONTEXT ctx, PCWSTR label, ULONG offset, ULONG words)
 {
@@ -773,6 +828,7 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
         goto out;
     }
     payloadSize = ctx->FwFileSize - payloadOffset;
+    ParseFwExtManifest(ctx, payloadOffset);
     LogLine(ctx, L"Firmware payload: offset 0x%X, %u bytes, signature '%c%c%c%c'",
         payloadOffset, payloadSize,
         ctx->FwFile[payloadOffset], ctx->FwFile[payloadOffset + 1],
@@ -918,7 +974,10 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
             msg, msgExt, ready.hdr.cmd, ready.hdr.size);
 
         if ((ready.hdr.cmd & SOF_GLB_TYPE_MASK) == SOF_IPC_FW_READY) {
-            ParseExtData(ctx, MBOX_UPLINK_OFFSET + sizeof(SOF_IPC_FW_READY_MSG));
+            if (!ctx->HostBoxSize || !ctx->DspBoxSize) {
+                // Older firmware: windows follow FW_READY in the mailbox.
+                ParseExtData(ctx, MBOX_UPLINK_OFFSET + sizeof(SOF_IPC_FW_READY_MSG));
+            }
             CHAR tagStr[7] = { 0 };
             RtlCopyMemory(tagStr, ready.version.tag, 6);
             LogLine(ctx, L"FW_READY: SOF %u.%u.%u build %u tag '%S' ABI 0x%08X",
@@ -967,7 +1026,7 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     ctx->Log[0] = L'\0';
-    LogLine(ctx, L"sofapl 0.3.1 starting (milestone 3a: IPC + speaker pipeline, silent)");
+    LogLine(ctx, L"sofapl 0.3.2 starting (milestone 3a: IPC + speaker pipeline, silent)");
 
     NTSTATUS st = WdfFdoQueryForInterface(Device, &GUID_ADSP_BUS_INTERFACE,
         (PINTERFACE)&ctx->Bus, sizeof(ADSP_BUS_INTERFACE), 1, NULL);
