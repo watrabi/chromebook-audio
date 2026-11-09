@@ -353,7 +353,7 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
 
     // ---- validate resources ----
     stage = L"resources";
-    if (!ctx->DspBar.Base.baseptr || ctx->DspBar.Len < MBOX_UPLINK_OFFSET + sizeof(SOF_IPC_FW_READY) ||
+    if (!ctx->DspBar.Base.baseptr || ctx->DspBar.Len < MBOX_UPLINK_OFFSET + sizeof(SOF_IPC_FW_READY_MSG) ||
         !ctx->HdaBar.Base.baseptr || !ctx->Ppcap) {
         LogLine(ctx, L"Missing resources: HDA=%p DSP=%p (len 0x%X) PPCAP=%p",
             ctx->HdaBar.Base.Base, ctx->DspBar.Base.Base, ctx->DspBar.Len, ctx->Ppcap);
@@ -498,7 +498,7 @@ static NTSTATUS SofBootFirmware(PDEVICE_CONTEXT ctx, PCWSTR* stageOut)
     {
         ULONG msg = v & HIPCT_MSG_MASK;
         ULONG msgExt = DspRead(ctx, DSP_REG_HIPCTE);
-        SOF_IPC_FW_READY ready;
+        SOF_IPC_FW_READY_MSG ready;
         PUINT8 src = ctx->DspBar.Base.baseptr + MBOX_UPLINK_OFFSET;
         for (ULONG i = 0; i < sizeof(ready); i += 4) {
             *(PULONG)((PUINT8)&ready + i) = READ_REGISTER_ULONG((PULONG)(src + i));

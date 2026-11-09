@@ -3,6 +3,9 @@
 // with the PCI_BAR definition from fdo.h, so this driver can be built separately.
 #pragma once
 
+// Win32 BOOL (4-byte int) is not defined in kernel headers; keep the same ABI.
+typedef int SOF_BOOL;
+
 union baseaddr {
     PVOID Base;
     UINT8* baseptr;
@@ -24,7 +27,7 @@ typedef struct _NHLT_INFO {
 
 typedef _Must_inspect_result_ NTSTATUS(*PGET_ADSP_RESOURCES) (_In_ PVOID _context, _Out_ _PCI_BAR* hdaBar, _Out_ _PCI_BAR* adspBar, PVOID* ppcap, PNHLT_INFO nhltInfo, _Out_ BUS_INTERFACE_STANDARD* pciConfig);
 typedef _Must_inspect_result_ NTSTATUS(*PDSP_SET_POWER_STATE) (_In_ PVOID _context, _In_ DEVICE_POWER_STATE newPowerState);
-typedef _Must_inspect_result_ BOOL(*PADSP_INTERRUPT_CALLBACK)(PVOID context);
+typedef _Must_inspect_result_ SOF_BOOL(*PADSP_INTERRUPT_CALLBACK)(PVOID context);
 typedef _Must_inspect_result_ NTSTATUS(*PREGISTER_ADSP_INTERRUPT) (_In_ PVOID _context, _In_ PADSP_INTERRUPT_CALLBACK callback, _In_ PVOID callbackContext);
 typedef _Must_inspect_result_ NTSTATUS(*PUNREGISTER_ADSP_INTERRUPT) (_In_ PVOID _context);
 typedef _Must_inspect_result_ NTSTATUS(*PGET_STREAM)(_In_ PVOID _context, HDAUDIO_STREAM_FORMAT StreamFormat, PHANDLE Handle, _Out_ UINT8* streamTag);
@@ -32,7 +35,7 @@ typedef _Must_inspect_result_ NTSTATUS(*PFREE_STREAM)(_In_ PVOID _context, _In_ 
 typedef _Must_inspect_result_ NTSTATUS(*PDSP_PREPARE_STREAM)(_In_ PVOID _context, _In_ HANDLE Handle, _In_ unsigned int ByteSize, _In_ int frags, _Out_ PVOID* bdlBuf);
 typedef _Must_inspect_result_ NTSTATUS(*PDSP_CLEANUP_STREAM)(_In_ PVOID _context, _In_ HANDLE Handle);
 typedef _Must_inspect_result_ UINT32(*PDSP_STREAM_POSITION)(_In_ PVOID _context, _In_ HANDLE Handle);
-typedef void (*PDSP_START_STOP_STREAM)(_In_ PVOID _context, _In_ HANDLE Handle, BOOL startStop);
+typedef void (*PDSP_START_STOP_STREAM)(_In_ PVOID _context, _In_ HANDLE Handle, SOF_BOOL startStop);
 typedef void (*PDSP_ENABLE_SPIB)(_In_ PVOID _context, _In_ HANDLE Handle, UINT32 value);
 typedef void (*PDSP_DISABLE_SPIB)(_In_ PVOID _context, _In_ HANDLE Handle);
 

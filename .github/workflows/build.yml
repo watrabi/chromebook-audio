@@ -24,6 +24,17 @@ jobs:
           if (-not $wdm) { throw 'WDK headers not found on runner' }
           $wdm | Select-Object -ExpandProperty FullName
 
+      - name: Inspect WDK InfVerif wiring
+        shell: pwsh
+        run: |
+          $t = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\build\*\WindowsDriver.common.targets' | Sort-Object FullName -Descending | Select-Object -First 1
+          Write-Host "::notice::targets file: $($t.FullName)"
+          Select-String -Path $t.FullName -Pattern 'InfVerif' | Select-Object -First 25 | ForEach-Object {
+            Write-Host ("::notice::L{0}: {1}" -f $_.LineNumber, $_.Line.Trim())
+          }
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Tools' -Recurse -Filter 'InfVerif*' -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "::notice::found $($_.FullName)" }
+
       - name: Build drivers
         shell: pwsh
         run: |

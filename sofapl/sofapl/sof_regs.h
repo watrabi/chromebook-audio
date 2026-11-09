@@ -109,7 +109,7 @@ typedef struct _SOF_IPC_FW_VERSION {
     UINT32 reserved[3];
 } SOF_IPC_FW_VERSION;
 
-typedef struct _SOF_IPC_FW_READY {
+typedef struct _SOF_IPC_FW_READY_MSG {
     SOF_IPC_CMD_HDR hdr;
     UINT32 dspbox_offset;
     UINT32 hostbox_offset;
@@ -118,7 +118,7 @@ typedef struct _SOF_IPC_FW_READY {
     SOF_IPC_FW_VERSION version;
     UINT64 flags;
     UINT32 reserved[4];
-} SOF_IPC_FW_READY;
+} SOF_IPC_FW_READY_MSG;
 
 typedef struct _SOF_EXT_MAN_HEADER {
     UINT32 magic;
