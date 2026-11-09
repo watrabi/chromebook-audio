@@ -596,7 +596,7 @@ static NTSTATUS SetupSpeakerPipeline(PDEVICE_CONTEXT ctx)
     // 9. SSP5 configuration (I2S, SSP provides BCLK/FSYNC, 19.2 MHz MCLK,
     //    1.536 MHz BCLK, 2 x 16-bit slots). clks_control = 0: no early clocks.
     {
-        SOF_IPC_DAI_CONFIG m;
+        SOF_IPC_DAI_CONFIG_MSG m;
         RtlZeroMemory(&m, sizeof(m));
         m.hdr.size = sizeof(m);
         m.hdr.cmd = SOF_IPC_GLB_DAI_MSG | SOF_IPC_DAI_CONFIG;

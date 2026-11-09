@@ -314,7 +314,7 @@ typedef struct _SOF_IPC_DAI_SSP_PARAMS {
 // The kernel's union is sized by the DMIC params (164 bytes); send the same size.
 #define SOF_DAI_PARAMS_UNION_SIZE 164
 
-typedef struct _SOF_IPC_DAI_CONFIG {
+typedef struct _SOF_IPC_DAI_CONFIG_MSG {
     SOF_IPC_CMD_HDR hdr;
     UINT32 type;
     UINT32 dai_index;
@@ -326,7 +326,7 @@ typedef struct _SOF_IPC_DAI_CONFIG {
         SOF_IPC_DAI_SSP_PARAMS ssp;
         UINT8 raw[SOF_DAI_PARAMS_UNION_SIZE];
     };
-} SOF_IPC_DAI_CONFIG;
+} SOF_IPC_DAI_CONFIG_MSG;
 
 typedef struct _SOF_IPC_HOST_BUFFER {
     SOF_IPC_HDR hdr;
@@ -365,6 +365,6 @@ static_assert(sizeof(SOF_IPC_COMP_DAI) == 80 + 16, "sof_ipc_comp_dai + uuid");
 static_assert(sizeof(SOF_IPC_COMP_VOLUME) == 84 + 16, "sof_ipc_comp_volume + uuid");
 static_assert(sizeof(SOF_IPC_PIPE_NEW) == 48, "sof_ipc_pipe_new");
 static_assert(sizeof(SOF_IPC_DAI_SSP_PARAMS) == 60, "sof_ipc_dai_ssp_params");
-static_assert(sizeof(SOF_IPC_DAI_CONFIG) == 216, "sof_ipc_dai_config");
+static_assert(sizeof(SOF_IPC_DAI_CONFIG_MSG) == 216, "sof_ipc_dai_config");
 static_assert(sizeof(SOF_IPC_CTRL_DATA_2CH) == 92 + 16, "sof_ipc_ctrl_data + 2 chanv");
 static_assert(sizeof(SOF_IPC_FW_READY_MSG) == 108, "sof_ipc_fw_ready");
