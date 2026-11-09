@@ -368,3 +368,59 @@ static_assert(sizeof(SOF_IPC_DAI_SSP_PARAMS) == 60, "sof_ipc_dai_ssp_params");
 static_assert(sizeof(SOF_IPC_DAI_CONFIG_MSG) == 216, "sof_ipc_dai_config");
 static_assert(sizeof(SOF_IPC_CTRL_DATA_2CH) == 92 + 16, "sof_ipc_ctrl_data + 2 chanv");
 static_assert(sizeof(SOF_IPC_FW_READY_MSG) == 108, "sof_ipc_fw_ready");
+
+// ===========================================================================
+// Stream messages (include/sound/sof/stream.h)
+// ===========================================================================
+#define SOF_IPC_STREAM_PCM_PARAMS       SOF_CMD_TYPE(0x001)
+#define SOF_IPC_STREAM_PCM_FREE         SOF_CMD_TYPE(0x003)
+#define SOF_IPC_STREAM_TRIG_START       SOF_CMD_TYPE(0x004)
+#define SOF_IPC_STREAM_TRIG_STOP        SOF_CMD_TYPE(0x005)
+#define SOF_IPC_BUFFER_INTERLEAVED      0
+#define SOF_IPC_MAX_CHANNELS            8
+
+#pragma pack(push, 1)
+typedef struct _SOF_IPC_STREAM_PARAMS {
+    SOF_IPC_HDR hdr;
+    SOF_IPC_HOST_BUFFER buffer;
+    UINT32 direction;
+    UINT32 frame_fmt;
+    UINT32 buffer_fmt;
+    UINT32 rate;
+    UINT16 stream_tag;
+    UINT16 channels;
+    UINT16 sample_valid_bytes;
+    UINT16 sample_container_bytes;
+    UINT32 host_period_bytes;
+    UINT16 no_stream_position;
+    UINT8 cont_update_posn;
+    UINT8 reserved0;
+    INT16 ext_data_length;
+    UINT8 reserved[2];
+    UINT16 chmap[SOF_IPC_MAX_CHANNELS];
+} SOF_IPC_STREAM_PARAMS;
+
+typedef struct _SOF_IPC_PCM_PARAMS {
+    SOF_IPC_CMD_HDR hdr;
+    UINT32 comp_id;
+    UINT32 flags;
+    UINT32 reserved[2];
+    SOF_IPC_STREAM_PARAMS params;
+} SOF_IPC_PCM_PARAMS;
+
+typedef struct _SOF_IPC_PCM_PARAMS_REPLY {
+    SOF_IPC_REPLY rhdr;
+    UINT32 comp_id;
+    UINT32 posn_offset;
+} SOF_IPC_PCM_PARAMS_REPLY;
+
+typedef struct _SOF_IPC_STREAM {
+    SOF_IPC_CMD_HDR hdr;
+    UINT32 comp_id;
+} SOF_IPC_STREAM;
+#pragma pack(pop)
+
+static_assert(sizeof(SOF_IPC_STREAM_PARAMS) == 84, "sof_ipc_stream_params");
+static_assert(sizeof(SOF_IPC_PCM_PARAMS) == 108, "sof_ipc_pcm_params");
+static_assert(sizeof(SOF_IPC_PCM_PARAMS_REPLY) == 20, "sof_ipc_pcm_params_reply");
+static_assert(sizeof(SOF_IPC_STREAM) == 12, "sof_ipc_stream");

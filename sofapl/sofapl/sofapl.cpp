@@ -54,6 +54,15 @@ typedef struct _DEVICE_CONTEXT {
 
     BOOLEAN SpeakerPipelineReady;
 
+    FAST_MUTEX IpcLock;
+
+    // Speaker playback stream (HDA host DMA owned through sklhdaudbus)
+    HANDLE SpkStream;
+    UINT8 SpkTag;
+    ULONG SpkIdx;
+    BOOLEAN SpkParamsSet;
+    BOOLEAN SpkRunning;
+
     WCHAR Log[LOG_CHARS];
 } DEVICE_CONTEXT, * PDEVICE_CONTEXT;
 
@@ -459,7 +468,20 @@ static void IpcServiceNotifications(PDEVICE_CONTEXT ctx)
 
 // Send one IPC3 message and wait (polling) for the reply.
 // Returns STATUS_SUCCESS only if the firmware replied with error == 0.
+static NTSTATUS IpcTxLocked(PDEVICE_CONTEXT ctx, PCWSTR what, const VOID* msg, ULONG size,
+    PVOID reply, ULONG replySize);
+
+// Serialises IPC between the boot path and (later) audio stream callbacks.
 static NTSTATUS IpcTx(PDEVICE_CONTEXT ctx, PCWSTR what, const VOID* msg, ULONG size,
+    PVOID reply, ULONG replySize)
+{
+    ExAcquireFastMutex(&ctx->IpcLock);
+    NTSTATUS st = IpcTxLocked(ctx, what, msg, size, reply, replySize);
+    ExReleaseFastMutex(&ctx->IpcLock);
+    return st;
+}
+
+static NTSTATUS IpcTxLocked(PDEVICE_CONTEXT ctx, PCWSTR what, const VOID* msg, ULONG size,
     PVOID reply, ULONG replySize)
 {
     const SOF_IPC_CMD_HDR* hdr = (const SOF_IPC_CMD_HDR*)msg;
@@ -718,6 +740,207 @@ static NTSTATUS SetupSpeakerPipeline(PDEVICE_CONTEXT ctx)
 
     ctx->SpeakerPipelineReady = TRUE;
     return STATUS_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// Speaker stream API (used by the self-test now, by the audio driver later)
+//
+// Order follows Linux sof_pcm_hw_params / sof_pcm_trigger for IPC3 on HDA:
+//   open:  HDA host stream setup (APL PROCEN/format quirk) -> STREAM_PCM_PARAMS
+//   start: HDA host DMA run -> STREAM_TRIG_START
+//   stop:  STREAM_TRIG_STOP -> HDA host DMA stop
+//   close: STREAM_PCM_FREE -> release HDA stream
+// Only S16_LE / 48 kHz / stereo is supported for now.
+// ---------------------------------------------------------------------------
+
+#define SPK_RATE        48000
+#define SPK_CHANNELS    2
+#define SPK_BYTES       2
+#define SPK_HDA_FORMAT  0x0011   // 48 kHz base, 16-bit, 2 channels
+
+static void SpkStreamRelease(PDEVICE_CONTEXT ctx)
+{
+    if (!ctx->SpkStream) return;
+    ctx->Bus.CleanupDSP(ctx->Bus.Context, ctx->SpkStream);
+    NTSTATUS st = ctx->Bus.FreeStream(ctx->Bus.Context, ctx->SpkStream);
+    if (!NT_SUCCESS(st)) LogLine(ctx, L"Speaker FreeStream failed: 0x%08X", st);
+    ctx->SpkStream = NULL;
+}
+
+// bufPhys must be physically contiguous, 128-byte aligned; size multiple of 256.
+static NTSTATUS SpkStreamOpen(PDEVICE_CONTEXT ctx, PHYSICAL_ADDRESS bufPhys, ULONG size, ULONG periodBytes)
+{
+    if (!ctx->SpeakerPipelineReady) return STATUS_DEVICE_NOT_READY;
+    if (ctx->SpkStream) return STATUS_DEVICE_BUSY;
+    if (size < 512 || (size % 256) != 0 || (bufPhys.LowPart & 127)) return STATUS_INVALID_PARAMETER;
+
+    HDAUDIO_STREAM_FORMAT fmt;
+    RtlZeroMemory(&fmt, sizeof(fmt));
+    fmt.SampleRate = SPK_RATE;
+    fmt.ValidBitsPerSample = 16;
+    fmt.ContainerSize = 16;
+    fmt.NumberOfChannels = SPK_CHANNELS;
+
+    NTSTATUS st = ctx->Bus.GetRenderStream(ctx->Bus.Context, fmt, &ctx->SpkStream, &ctx->SpkTag);
+    if (!NT_SUCCESS(st)) {
+        ctx->SpkStream = NULL;
+        LogLine(ctx, L"Speaker GetRenderStream failed: 0x%08X", st);
+        return st;
+    }
+
+    PVOID bdlPtr = NULL;
+    st = ctx->Bus.PrepareDSP(ctx->Bus.Context, ctx->SpkStream, size, 2, &bdlPtr);
+    if (!NT_SUCCESS(st) || !bdlPtr) {
+        LogLine(ctx, L"Speaker PrepareDSP failed: 0x%08X", st);
+        SpkStreamRelease(ctx);
+        return NT_SUCCESS(st) ? STATUS_UNSUCCESSFUL : st;
+    }
+
+    ULONG half = size / 2;   // size % 256 == 0 -> half is 128-aligned
+    PHDAC_BDLENTRY bdl = (PHDAC_BDLENTRY)bdlPtr;
+    bdl[0].lowAddr = bufPhys.LowPart;
+    bdl[0].highAddr = (UINT32)bufPhys.HighPart;
+    bdl[0].len = half;
+    bdl[0].ioc = 0;
+    bdl[1].lowAddr = bufPhys.LowPart + half;
+    bdl[1].highAddr = (UINT32)bufPhys.HighPart;
+    bdl[1].len = size - half;
+    bdl[1].ioc = 0;
+    KeMemoryBarrier();
+
+    // Apollo Lake: program the format with host/link DMA coupled.
+    USHORT gcap = READ_REGISTER_USHORT((PUSHORT)(ctx->HdaBar.Base.baseptr + HDA_REG_GCAP));
+    ctx->SpkIdx = ((gcap >> 8) & 0xF) + ctx->SpkTag - 1;
+    PULONG ppctl = (PULONG)(ctx->Ppcap + PP_REG_PPCTL);
+    PUSHORT sdFmt = (PUSHORT)(ctx->HdaBar.Base.baseptr + HDA_SD_BASE + HDA_SD_STRIDE * ctx->SpkIdx + HDA_SD_FORMAT);
+    WRITE_REGISTER_ULONG(ppctl, READ_REGISTER_ULONG(ppctl) & ~PPCTL_PROCEN(ctx->SpkIdx));
+    WRITE_REGISTER_USHORT(sdFmt, SPK_HDA_FORMAT);
+    WRITE_REGISTER_ULONG(ppctl, READ_REGISTER_ULONG(ppctl) | PPCTL_PROCEN(ctx->SpkIdx));
+
+    SOF_IPC_PCM_PARAMS m;
+    RtlZeroMemory(&m, sizeof(m));
+    m.hdr.size = sizeof(m);
+    m.hdr.cmd = SOF_IPC_GLB_STREAM_MSG | SOF_IPC_STREAM_PCM_PARAMS;
+    m.comp_id = SPK_COMP_HOST;
+    m.params.hdr.size = sizeof(m.params);
+    m.params.buffer.phy_addr = 0;                 // no host page table on cAVS/HDA
+    m.params.buffer.pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    m.params.buffer.size = size;
+    m.params.direction = SOF_IPC_STREAM_PLAYBACK;
+    m.params.frame_fmt = SOF_IPC_FRAME_S16_LE;
+    m.params.buffer_fmt = SOF_IPC_BUFFER_INTERLEAVED;
+    m.params.rate = SPK_RATE;
+    m.params.stream_tag = ctx->SpkTag;
+    m.params.channels = SPK_CHANNELS;
+    m.params.sample_valid_bytes = SPK_BYTES;
+    m.params.sample_container_bytes = SPK_BYTES;
+    m.params.host_period_bytes = periodBytes;
+    m.params.no_stream_position = 1;              // position comes from the HDA DPIB
+
+    SOF_IPC_PCM_PARAMS_REPLY reply;
+    RtlZeroMemory(&reply, sizeof(reply));
+    st = IpcTx(ctx, L"pcm params", &m, sizeof(m), &reply, sizeof(reply));
+    if (!NT_SUCCESS(st)) {
+        SpkStreamRelease(ctx);
+        return st;
+    }
+    ctx->SpkParamsSet = TRUE;
+    LogLine(ctx, L"Speaker stream open: tag %u index %u, %u bytes, period %u, posn_offset 0x%X",
+        ctx->SpkTag, ctx->SpkIdx, size, periodBytes, reply.posn_offset);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS SpkStreamTrigger(PDEVICE_CONTEXT ctx, BOOLEAN start)
+{
+    if (!ctx->SpkStream || !ctx->SpkParamsSet) return STATUS_INVALID_DEVICE_STATE;
+
+    SOF_IPC_STREAM m;
+    RtlZeroMemory(&m, sizeof(m));
+    m.hdr.size = sizeof(m);
+    m.comp_id = SPK_COMP_HOST;
+    NTSTATUS st;
+
+    if (start) {
+        if (ctx->SpkRunning) return STATUS_SUCCESS;
+        ctx->Bus.TriggerDSP(ctx->Bus.Context, ctx->SpkStream, TRUE);
+        m.hdr.cmd = SOF_IPC_GLB_STREAM_MSG | SOF_IPC_STREAM_TRIG_START;
+        st = IpcTx(ctx, L"trigger start", &m, sizeof(m), NULL, 0);
+        if (!NT_SUCCESS(st)) {
+            ctx->Bus.TriggerDSP(ctx->Bus.Context, ctx->SpkStream, FALSE);
+            return st;
+        }
+        ctx->SpkRunning = TRUE;
+    } else {
+        if (!ctx->SpkRunning) return STATUS_SUCCESS;
+        m.hdr.cmd = SOF_IPC_GLB_STREAM_MSG | SOF_IPC_STREAM_TRIG_STOP;
+        st = IpcTx(ctx, L"trigger stop", &m, sizeof(m), NULL, 0);
+        // stop the host DMA even if the IPC failed
+        ctx->Bus.TriggerDSP(ctx->Bus.Context, ctx->SpkStream, FALSE);
+        ctx->SpkRunning = FALSE;
+    }
+    return st;
+}
+
+static ULONG SpkStreamPosition(PDEVICE_CONTEXT ctx)
+{
+    if (!ctx->SpkStream) return 0;
+    return ctx->Bus.StreamPosition(ctx->Bus.Context, ctx->SpkStream);
+}
+
+static void SpkStreamClose(PDEVICE_CONTEXT ctx)
+{
+    if (!ctx->SpkStream) return;
+    if (ctx->SpkRunning) SpkStreamTrigger(ctx, FALSE);
+    if (ctx->SpkParamsSet) {
+        SOF_IPC_STREAM m;
+        RtlZeroMemory(&m, sizeof(m));
+        m.hdr.size = sizeof(m);
+        m.hdr.cmd = SOF_IPC_GLB_STREAM_MSG | SOF_IPC_STREAM_PCM_FREE;
+        m.comp_id = SPK_COMP_HOST;
+        IpcTx(ctx, L"pcm free", &m, sizeof(m), NULL, 0);
+        ctx->SpkParamsSet = FALSE;
+    }
+    SpkStreamRelease(ctx);
+}
+
+// Milestone 3b-1 self-test: stream one second of digital silence (all-zero
+// samples, volume still -40 dB) and check that the DMA position advances.
+static NTSTATUS SilenceSelfTest(PDEVICE_CONTEXT ctx)
+{
+    const ULONG periodBytes = 1920;            // 10 ms of S16 stereo @ 48 kHz
+    const ULONG size = periodBytes * 20;       // 200 ms ring, multiple of 256
+    PHYSICAL_ADDRESS low, high, skip;
+    low.QuadPart = 0;
+    high.QuadPart = 0xFFFFFFFF;
+    skip.QuadPart = 0;
+    PVOID buf = MmAllocateContiguousMemorySpecifyCache(ROUND_TO_PAGES(size), low, high, skip, MmNonCached);
+    if (!buf) return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(buf, ROUND_TO_PAGES(size));   // silence
+
+    NTSTATUS st = SpkStreamOpen(ctx, MmGetPhysicalAddress(buf), size, periodBytes);
+    if (NT_SUCCESS(st)) {
+        st = SpkStreamTrigger(ctx, TRUE);
+        if (NT_SUCCESS(st)) {
+            ULONG pos[6];
+            ULONG wraps = 0, prev = 0, moved = 0;
+            for (int i = 0; i < 6; i++) {
+                SleepUs(200000);
+                IpcServiceNotifications(ctx);
+                pos[i] = SpkStreamPosition(ctx);
+                if (i > 0 && pos[i] != prev) moved++;
+                if (pos[i] < prev) wraps++;
+                prev = pos[i];
+            }
+            LogLine(ctx, L"Silence test positions: %u %u %u %u %u %u (changed %u/5, wraps %u)",
+                pos[0], pos[1], pos[2], pos[3], pos[4], pos[5], moved, wraps);
+            NTSTATUS stopSt = SpkStreamTrigger(ctx, FALSE);
+            if (moved == 0) st = STATUS_IO_DEVICE_ERROR;
+            else if (!NT_SUCCESS(stopSt)) st = stopSt;
+        }
+        SpkStreamClose(ctx);
+    }
+    MmFreeContiguousMemorySpecifyCache(buf, ROUND_TO_PAGES(size), MmNonCached);
+    return st;
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,7 +1249,7 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     ctx->Log[0] = L'\0';
-    LogLine(ctx, L"sofapl 0.3.2 starting (milestone 3a: IPC + speaker pipeline, silent)");
+    LogLine(ctx, L"sofapl 0.4.0 starting (milestone 3b-1: silence stream self-test)");
 
     NTSTATUS st = WdfFdoQueryForInterface(Device, &GUID_ADSP_BUS_INTERFACE,
         (PINTERFACE)&ctx->Bus, sizeof(ADSP_BUS_INTERFACE), 1, NULL);
@@ -1095,6 +1318,14 @@ NTSTATUS SofEvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE)
         stage = NT_SUCCESS(st) ? L"speaker-pipeline-ready" : L"speaker-pipeline-failed";
         LogLine(ctx, L"Speaker pipeline: %s (0x%08X), %u IPCs, %u notifications",
             stage, st, ctx->IpcCount, ctx->NotifyCount);
+
+        if (NT_SUCCESS(st)) {
+            // Milestone 3b-1: 1 second of all-zero samples (digital silence).
+            st = SilenceSelfTest(ctx);
+            stage = NT_SUCCESS(st) ? L"silence-test-passed" : L"silence-test-failed";
+            LogLine(ctx, L"Silence self-test: %s (0x%08X), %u IPCs, %u notifications",
+                stage, st, ctx->IpcCount, ctx->NotifyCount);
+        }
     }
     SaveRegistry(ctx, stage, st);
 
@@ -1107,6 +1338,14 @@ NTSTATUS SofEvtD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     if (!ctx->BusValid) return STATUS_SUCCESS;
+
+    if (ctx->FwRunning) {
+        SpkStreamClose(ctx);
+    } else {
+        SpkStreamRelease(ctx);
+    }
+    ctx->SpkRunning = FALSE;
+    ctx->SpkParamsSet = FALSE;
 
     if (ctx->DspBar.Base.baseptr) {
         CoreResetPowerDown(ctx, APL_CORE_MASK_ALL);
@@ -1142,6 +1381,7 @@ NTSTATUS SofEvtDeviceAdd(WDFDRIVER, PWDFDEVICE_INIT DeviceInit)
 
     PDEVICE_CONTEXT ctx = GetDeviceContext(device);
     ctx->Device = device;
+    ExInitializeFastMutex(&ctx->IpcLock);
     return STATUS_SUCCESS;
 }
 
