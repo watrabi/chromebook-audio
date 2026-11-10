@@ -46,6 +46,7 @@ jobs:
             'sklhdaudbus\sklhdaudbus\sklhdaudbus.vcxproj',
             'da7219\da7219\da7219.vcxproj',
             'sofapl\sofapl\sofapl.vcxproj',
+            'max98357a\max98357a\max98357a.vcxproj',
             # sofaudio (adapted Microsoft SimpleAudioSample): libs first, then the driver
             'sofaudio\Source\Utilities\Utilities.vcxproj',
             'sofaudio\Source\Filters\Filters.vcxproj',
@@ -88,6 +89,7 @@ jobs:
             'sklhdaudbus' = 'sklhdaudbus'
             'da7219'      = 'da7219'
             'sofapl'      = 'sofapl'
+            'max98357a'   = 'max98357a'
             'sofaudio'    = 'SimpleAudioSample'
           }
           foreach ($name in $packages.Keys) {

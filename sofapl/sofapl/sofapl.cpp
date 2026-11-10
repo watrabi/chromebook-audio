@@ -64,6 +64,9 @@ typedef struct _DEVICE_CONTEXT {
     BOOLEAN SpkParamsSet;
     BOOLEAN SpkRunning;
 
+    // \Callback\CsAudioCallbackAPI (speaker amp enable via max98357a driver)
+    PCALLBACK_OBJECT CsAudioCallback;
+
     WCHAR Log[LOG_CHARS];
 } DEVICE_CONTEXT, * PDEVICE_CONTEXT;
 
@@ -857,6 +860,46 @@ static NTSTATUS SpkStreamOpen(PDEVICE_CONTEXT ctx, PHYSICAL_ADDRESS bufPhys, ULO
     return STATUS_SUCCESS;
 }
 
+// ---------------------------------------------------------------------------
+// CoolStar audio callback protocol (\Callback\CsAudioCallbackAPI), as used by
+// coolstar/max98357a (Apache-2.0): the amp driver drives the MAX98357A SD_MODE
+// pin high on a Speaker "Start" and low on "Stop". Layout copied from its
+// driver.h.
+// ---------------------------------------------------------------------------
+enum { CSAudioEndpointTypeDSP = 0, CSAudioEndpointTypeSpeaker = 1, CSAudioEndpointTypeHeadphone = 2 };
+enum { CSAudioEndpointRegister = 0, CSAudioEndpointStart = 1, CSAudioEndpointStop = 2 };
+
+typedef struct _CS_AUDIO_FORMAT_OVERRIDE {
+    UINT16 channels;
+    UINT16 frequency;
+    UINT16 bitsPerSample;
+    UINT16 validBitsPerSample;
+    INT32 force32BitOutputContainer;   // Win32 BOOL
+} CS_AUDIO_FORMAT_OVERRIDE;
+
+typedef struct _CS_AUDIO_ARG {
+    UINT32 argSz;
+    INT32 endpointType;                // enum (int)
+    INT32 endpointRequest;             // enum (int)
+    union {
+        CS_AUDIO_FORMAT_OVERRIDE formatOverride;
+    };
+} CS_AUDIO_ARG;
+
+// Identifies our own notifications (receivers compare Argument2 pointers).
+static int g_SofCsAudioTag = 1;
+
+static void CsAudioNotify(PDEVICE_CONTEXT ctx, INT32 endpointType, INT32 request)
+{
+    if (!ctx->CsAudioCallback) return;
+    CS_AUDIO_ARG arg;
+    RtlZeroMemory(&arg, sizeof(arg));
+    arg.argSz = sizeof(arg);
+    arg.endpointType = endpointType;
+    arg.endpointRequest = request;
+    ExNotifyCallback(ctx->CsAudioCallback, &arg, &g_SofCsAudioTag);
+}
+
 static NTSTATUS SpkStreamTrigger(PDEVICE_CONTEXT ctx, BOOLEAN start)
 {
     if (!ctx->SpkStream || !ctx->SpkParamsSet) return STATUS_INVALID_DEVICE_STATE;
@@ -877,8 +920,12 @@ static NTSTATUS SpkStreamTrigger(PDEVICE_CONTEXT ctx, BOOLEAN start)
             return st;
         }
         ctx->SpkRunning = TRUE;
+        // amp on once clocks are running (the amp driver waits 5 ms itself)
+        CsAudioNotify(ctx, CSAudioEndpointTypeSpeaker, CSAudioEndpointStart);
     } else {
         if (!ctx->SpkRunning) return STATUS_SUCCESS;
+        // amp off before the clocks stop, to avoid a pop
+        CsAudioNotify(ctx, CSAudioEndpointTypeSpeaker, CSAudioEndpointStop);
         m.hdr.cmd = SOF_IPC_GLB_STREAM_MSG | SOF_IPC_STREAM_TRIG_STOP;
         st = IpcTx(ctx, L"trigger stop", &m, sizeof(m), NULL, 0);
         // stop the host DMA even if the IPC failed
@@ -1256,7 +1303,7 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     ctx->Log[0] = L'\0';
-    LogLine(ctx, L"sofapl 0.5.0 starting (milestone 3b-2: speaker child device for sofaudio)");
+    LogLine(ctx, L"sofapl 0.5.1 starting (speaker amp enable via CsAudio callback)");
 
     NTSTATUS st = WdfFdoQueryForInterface(Device, &GUID_ADSP_BUS_INTERFACE,
         (PINTERFACE)&ctx->Bus, sizeof(ADSP_BUS_INTERFACE), 1, NULL);
@@ -1287,6 +1334,19 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
         ctx->DspBar.Base.Base, ctx->DspBar.Len, ctx->Ppcap,
         ctx->Nhlt.nhlt, ctx->Nhlt.nhltSz);
 
+    // Callback object shared with CoolStar codec/amp drivers.
+    if (!ctx->CsAudioCallback) {
+        UNICODE_STRING cbName;
+        RtlInitUnicodeString(&cbName, L"\\Callback\\CsAudioCallbackAPI");
+        OBJECT_ATTRIBUTES oa;
+        InitializeObjectAttributes(&oa, &cbName, OBJ_KERNEL_HANDLE | OBJ_OPENIF | OBJ_CASE_INSENSITIVE | OBJ_PERMANENT, NULL, NULL);
+        NTSTATUS cst = ExCreateCallback(&ctx->CsAudioCallback, &oa, TRUE, TRUE);
+        if (!NT_SUCCESS(cst)) {
+            ctx->CsAudioCallback = NULL;
+        }
+        LogLine(ctx, L"CsAudio callback object: 0x%08X", cst);
+    }
+
     SaveRegistry(ctx, L"prepared", STATUS_SUCCESS);
     return STATUS_SUCCESS;
 }
@@ -1294,6 +1354,10 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 NTSTATUS SofEvtReleaseHardware(WDFDEVICE Device, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
+    if (ctx->CsAudioCallback) {
+        ObDereferenceObject(ctx->CsAudioCallback);
+        ctx->CsAudioCallback = NULL;
+    }
     if (ctx->FwFile) {
         ExFreePoolWithTag(ctx->FwFile, SOFAPL_POOL_TAG);
         ctx->FwFile = NULL;
