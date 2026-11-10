@@ -61,6 +61,7 @@ typedef struct _DEVICE_CONTEXT {
     HANDLE SpkStream;
     UINT8 SpkTag;
     ULONG SpkIdx;
+    ULONG SpkSize;
     BOOLEAN SpkParamsSet;
     BOOLEAN SpkRunning;
 
@@ -855,6 +856,7 @@ static NTSTATUS SpkStreamOpen(PDEVICE_CONTEXT ctx, PHYSICAL_ADDRESS bufPhys, ULO
         return st;
     }
     ctx->SpkParamsSet = TRUE;
+    ctx->SpkSize = size;
     LogLine(ctx, L"Speaker stream open: tag %u index %u, %u bytes, period %u, posn_offset 0x%X",
         ctx->SpkTag, ctx->SpkIdx, size, periodBytes, reply.posn_offset);
     return STATUS_SUCCESS;
@@ -935,10 +937,23 @@ static NTSTATUS SpkStreamTrigger(PDEVICE_CONTEXT ctx, BOOLEAN start)
     return st;
 }
 
+// Intel vendor-specific DPIB registers (include/sound/hda_register.h):
+// per-stream "DMA position in buffer" that reflects data actually transferred.
+#define AZX_REG_VS_SDXDPIB_XBASE      0x1084
+#define AZX_REG_VS_SDXDPIB_XINTERVAL  0x20
+
+// Linux (SOF_HDA_POSITION_QUIRK_USE_DPIB_REGISTERS, the default) reads the DPIB
+// register for playback instead of the DDR position buffer. Any IRQL.
 static ULONG SpkStreamPosition(PDEVICE_CONTEXT ctx)
 {
-    if (!ctx->SpkStream) return 0;
-    return ctx->Bus.StreamPosition(ctx->Bus.Context, ctx->SpkStream);
+    if (!ctx->SpkStream || !ctx->HdaBar.Base.baseptr) return 0;
+    ULONG off = AZX_REG_VS_SDXDPIB_XBASE + AZX_REG_VS_SDXDPIB_XINTERVAL * ctx->SpkIdx;
+    if (off + 4 > ctx->HdaBar.Len) {
+        return ctx->Bus.StreamPosition(ctx->Bus.Context, ctx->SpkStream);
+    }
+    ULONG pos = READ_REGISTER_ULONG((PULONG)(ctx->HdaBar.Base.baseptr + off));
+    if (pos >= ctx->SpkSize) pos = 0;
+    return pos;
 }
 
 static void SpkStreamClose(PDEVICE_CONTEXT ctx)
@@ -1303,7 +1318,7 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     ctx->Log[0] = L'\0';
-    LogLine(ctx, L"sofapl 0.5.1 starting (speaker amp enable via CsAudio callback)");
+    LogLine(ctx, L"sofapl 0.5.2 starting (DPIB register position)");
 
     NTSTATUS st = WdfFdoQueryForInterface(Device, &GUID_ADSP_BUS_INTERFACE,
         (PINTERFACE)&ctx->Bus, sizeof(ADSP_BUS_INTERFACE), 1, NULL);

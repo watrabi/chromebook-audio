@@ -97,6 +97,7 @@ protected:
     BOOLEAN                     m_bSofOpen;
     BOOLEAN                     m_bSofRunning;
     ULONG                       m_ulSofLastHwPos;
+    ULONGLONG                   m_ullSofLastPacket;
     ULONG                       m_ulNotificationsPerBuffer;
     KSSTATE                     m_KsState;
     PKTIMER                     m_pTimer;

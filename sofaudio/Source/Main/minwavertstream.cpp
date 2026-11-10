@@ -120,6 +120,7 @@ VOID CMiniportWaveRTStream::SofCloseStream()
     m_bSofOpen = FALSE;
     m_bSofRunning = FALSE;
     m_ulSofLastHwPos = 0;
+    m_ullSofLastPacket = 0;
 }
 
 //=============================================================================
@@ -339,6 +340,7 @@ Return Value:
     m_bSofOpen = FALSE;
     m_bSofRunning = FALSE;
     m_ulSofLastHwPos = 0;
+    m_ullSofLastPacket = 0;
     m_ulNotificationsPerBuffer = 0;
     m_KsState = KSSTATE_STOP;
     m_pTimer = NULL;
@@ -1730,6 +1732,31 @@ TimerNotifyRT
     // Calculate the time elapsed since the last we ran DPC that matched Notification interval. Note that the division by 10000 
     // to convert to milliseconds may cause us to lose some of the time, so we will carry the remainder forward.
 
+    if (!_this->m_bCapture && _this->m_bSofOpen && _this->m_ulNotificationsPerBuffer > 0)
+    {
+        // SOF: drive notifications from the real DMA position. Advance the
+        // position every tick and signal once per packet actually consumed.
+        _this->UpdatePosition(qpc);
+
+        ULONG packetSize = _this->m_ulDmaBufferSize / _this->m_ulNotificationsPerBuffer;
+        ULONGLONG consumedPackets = (packetSize > 0) ? (_this->m_ullLinearPosition / packetSize) : 0;
+        if (consumedPackets > _this->m_ullSofLastPacket)
+        {
+            if (!_this->m_bEoSReceived)
+            {
+                _this->m_llPacketCounter += (LONGLONG)(consumedPackets - _this->m_ullSofLastPacket);
+            }
+            _this->m_ullSofLastPacket = consumedPackets;
+            _this->m_ullLastDPCTimeStamp = hnsCurrentTime;
+            bufferCompleted = TRUE;
+        }
+        else if (!_this->m_bEoSReceived)
+        {
+            goto End;
+        }
+    }
+    else
+    {
     ULONG TimeElapsedInMS = (ULONG)(hnsCurrentTime - _this->m_ullLastDPCTimeStamp + _this->m_hnsDPCTimeCarryForward)/10000;
 
     if (TimeElapsedInMS >= _this->m_ulNotificationIntervalMs)
@@ -1751,6 +1778,7 @@ TimerNotifyRT
     if (!_this->m_bEoSReceived)
     {
         _this->m_llPacketCounter++;
+    }
     }
 
     if (_this->m_KsState != KSSTATE_RUN)
