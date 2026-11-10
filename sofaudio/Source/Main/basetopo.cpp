@@ -17,6 +17,7 @@ Abstract:
 
 #include "definitions.h"
 #include "basetopo.h"
+#include "sofhw.h"
 
 //=============================================================================
 #pragma code_seg("PAGE")
@@ -272,20 +273,29 @@ Return Value:
 
     NTSTATUS                    ntStatus = STATUS_INVALID_DEVICE_REQUEST;
 
+    // SOF: the adapter stores node values in one array shared by all filters;
+    // shift the headphone filter's volume/mute nodes so the two endpoints
+    // keep separate values (see sofhw.h).
+    ULONG nodeOffset = (m_SofDeviceType == eHeadphoneDevice) ? SOF_NODE_OFFSET_HEADPHONE : 0;
+
     switch (PropertyRequest->PropertyItem->Id)
     {
         case KSPROPERTY_AUDIO_VOLUMELEVEL:
+            PropertyRequest->Node += nodeOffset;
             ntStatus = PropertyHandler_Volume(
                                 m_AdapterCommon,
                                 PropertyRequest,
                                 m_DeviceMaxChannels);
+            PropertyRequest->Node -= nodeOffset;
             break;
-        
+
         case KSPROPERTY_AUDIO_MUTE:
+            PropertyRequest->Node += nodeOffset;
             ntStatus = PropertyHandler_Mute(
                                 m_AdapterCommon,
                                 PropertyRequest,
                                 m_DeviceMaxChannels);
+            PropertyRequest->Node -= nodeOffset;
             break;
 
         case KSPROPERTY_AUDIO_PEAKMETER2:

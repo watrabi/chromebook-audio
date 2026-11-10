@@ -91,6 +91,7 @@ protected:
     NTSTATUS SofStartStream();
     VOID     SofCloseStream();
     ULONG    SofHwDisplacement();
+    ULONG    SofEndpoint();
 
     // SOF DSP stream state (render only)
     PHYSICAL_ADDRESS            m_SofBufPhys;

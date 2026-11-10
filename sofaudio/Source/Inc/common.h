@@ -124,6 +124,7 @@ typedef enum
 {
     eSpeakerDevice = 0,
     eMicArrayDevice1,
+    eHeadphoneDevice,       // SOF: 3.5 mm headphones (DA7219)
     eMaxDeviceType,
 } eDeviceType;
 

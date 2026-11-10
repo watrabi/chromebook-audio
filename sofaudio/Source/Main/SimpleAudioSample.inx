@@ -102,6 +102,26 @@ HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
 HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x00010001,0x1
 
 ;======================================================
+; render interfaces: headphones (3.5 mm jack, DA7219)
+;======================================================
+[SIMPLEAUDIOSAMPLE.I.WaveHeadphone]
+AddReg=SIMPLEAUDIOSAMPLE.I.WaveHeadphone.AddReg
+
+[SIMPLEAUDIOSAMPLE.I.WaveHeadphone.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%SIMPLEAUDIOSAMPLE.WaveHeadphone.szPname%
+
+[SIMPLEAUDIOSAMPLE.I.TopologyHeadphone]
+AddReg=SIMPLEAUDIOSAMPLE.I.TopologyHeadphone.AddReg
+
+[SIMPLEAUDIOSAMPLE.I.TopologyHeadphone.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%SIMPLEAUDIOSAMPLE.TopologyHeadphone.szPname%
+
+HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x00010001,0x1
+
+;======================================================
 ; SIMPLEAUDIOSAMPLE_SA
 ;======================================================
 [SIMPLEAUDIOSAMPLE_SA.NT]
@@ -119,6 +139,15 @@ AddInterface=%KSCATEGORY_RENDER%, %KSNAME_WaveSpeaker%, SIMPLEAUDIOSAMPLE.I.Wave
 AddInterface=%KSCATEGORY_REALTIME%, %KSNAME_WaveSpeaker%, SIMPLEAUDIOSAMPLE.I.WaveSpeaker
 AddInterface=%KSCATEGORY_AUDIO%, %KSNAME_TopologySpeaker%, SIMPLEAUDIOSAMPLE.I.TopologySpeaker
 AddInterface=%KSCATEGORY_TOPOLOGY%, %KSNAME_TopologySpeaker%, SIMPLEAUDIOSAMPLE.I.TopologySpeaker
+
+;
+; Interfaces for the headphone (3.5 mm jack) render endpoint.
+;
+AddInterface=%KSCATEGORY_AUDIO%, %KSNAME_WaveHeadphone%, SIMPLEAUDIOSAMPLE.I.WaveHeadphone
+AddInterface=%KSCATEGORY_RENDER%, %KSNAME_WaveHeadphone%, SIMPLEAUDIOSAMPLE.I.WaveHeadphone
+AddInterface=%KSCATEGORY_REALTIME%, %KSNAME_WaveHeadphone%, SIMPLEAUDIOSAMPLE.I.WaveHeadphone
+AddInterface=%KSCATEGORY_AUDIO%, %KSNAME_TopologyHeadphone%, SIMPLEAUDIOSAMPLE.I.TopologyHeadphone
+AddInterface=%KSCATEGORY_TOPOLOGY%, %KSNAME_TopologyHeadphone%, SIMPLEAUDIOSAMPLE.I.TopologyHeadphone
 
 ;
 ; Interfaces for microphone array 1 (internal: front) capture endpoint.
@@ -161,6 +190,8 @@ KmdfLibraryVersion = $KMDFVERSION$
 
 KSNAME_WaveSpeaker="WaveSpeaker"
 KSNAME_TopologySpeaker="TopologySpeaker"
+KSNAME_WaveHeadphone="WaveHeadphone"
+KSNAME_TopologyHeadphone="TopologyHeadphone"
 
 KSNAME_WaveMicArray1="WaveMicArray1"
 KSNAME_TopologyMicArray1="TopologyMicArray1"
@@ -189,6 +220,8 @@ SimpleAudioSample.SvcDesc="Chromebook Audio (SOF) WaveRT Driver"
 ;; friendly names
 SIMPLEAUDIOSAMPLE.WaveSpeaker.szPname="Speakers"
 SIMPLEAUDIOSAMPLE.TopologySpeaker.szPname="Speakers Topology"
+SIMPLEAUDIOSAMPLE.WaveHeadphone.szPname="Headphones"
+SIMPLEAUDIOSAMPLE.TopologyHeadphone.szPname="Headphones Topology"
 
 SIMPLEAUDIOSAMPLE.WaveMicArray1.szPname="Simple Audio Sample Wave Microphone Array - Front"
 SIMPLEAUDIOSAMPLE.TopologyMicArray1.szPname="Simple Audio Sample Topology Microphone Array - Front"

@@ -19,4 +19,8 @@ NTSTATUS PropertyHandler_SpeakerTopoFilter(_In_ PPCPROPERTY_REQUEST PropertyRequ
 
 NTSTATUS PropertyHandler_SpeakerTopology(_In_ PPCPROPERTY_REQUEST PropertyRequest);
 
+// SOF: headphone endpoint (3.5 mm jack on the DA7219), same topology shape
+NTSTATUS PropertyHandler_HeadphoneTopoFilter(_In_ PPCPROPERTY_REQUEST PropertyRequest);
+NTSTATUS PropertyHandler_HeadphoneTopology(_In_ PPCPROPERTY_REQUEST PropertyRequest);
+
 #endif // _SIMPLEAUDIOSAMPLE_SPEAKERTOPO_H_

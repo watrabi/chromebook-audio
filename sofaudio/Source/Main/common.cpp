@@ -1073,8 +1073,9 @@ Return Value:
     if (m_pHW)
     {
         m_pHW->SetMixerMute(Index, Channel, Value);
-        // SOF: speaker topology has volume node 0 and mute node 1
-        SofApplyMixerGain(m_pHW->GetMixerVolume(0, 0), Value);
+        // SOF: Index is the stored node (see sofhw.h node offsets)
+        ULONG ep = SOF_NODE_TO_ENDPOINT(Index);
+        SofApplyMixerGain(ep, m_pHW->GetMixerVolume(SOF_ENDPOINT_NODE_BASE(ep) + SOF_NODE_VOLUME, 0), Value);
     }
 } // MixerMuteWrite
 
@@ -1205,8 +1206,9 @@ Return Value:
     if (m_pHW)
     {
         m_pHW->SetMixerVolume(Index, Channel, Value);
-        // SOF: speaker topology has volume node 0 and mute node 1
-        SofApplyMixerGain(Value, m_pHW->GetMixerMute(1, 0));
+        // SOF: Index is the stored node (see sofhw.h node offsets)
+        ULONG ep = SOF_NODE_TO_ENDPOINT(Index);
+        SofApplyMixerGain(ep, Value, m_pHW->GetMixerMute(SOF_ENDPOINT_NODE_BASE(ep) + SOF_NODE_MUTE, 0));
     }
 } // MixerVolumeWrite
 

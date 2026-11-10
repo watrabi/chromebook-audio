@@ -58,9 +58,10 @@ UNICODE_STRING g_RegistryPath;      // This is used to store the registry settin
 SOFAPL_AUDIO_INTERFACE g_SofIface;
 BOOLEAN g_SofIfaceValid = FALSE;
 
-// Last volume/mute from the topology filter (0 dB, unmuted until Windows sets it)
-static LONG g_SofVolume1616 = 0;
-static BOOL g_SofMute = FALSE;
+// Last volume/mute per endpoint from the topology filters
+// (0 dB, unmuted until Windows sets them)
+static LONG g_SofVolume1616[SOFAPL_EP_COUNT] = { 0, 0 };
+static BOOL g_SofMute[SOFAPL_EP_COUNT] = { FALSE, FALSE };
 
 // dB (16.16 fixed point, <= 0) -> linear gain Q1.16, integer only.
 // 0.5 dB steps: each step multiplies by 10^(-0.5/20) = 0.944060876 (Q32 4054710589).
@@ -78,22 +79,24 @@ static ULONG SofDbToQ16(LONG volume1616)
 }
 
 #pragma code_seg()
-VOID SofApplyMixerGain(_In_ LONG Volume1616, _In_ BOOL Mute)
+VOID SofApplyMixerGain(_In_ ULONG Endpoint, _In_ LONG Volume1616, _In_ BOOL Mute)
 {
-    g_SofVolume1616 = Volume1616;
-    g_SofMute = Mute;
+    if (Endpoint >= SOFAPL_EP_COUNT) return;
+    g_SofVolume1616[Endpoint] = Volume1616;
+    g_SofMute[Endpoint] = Mute;
     if (!g_SofIfaceValid) return;
 
-    ULONG gain = Mute ? 0 : SofDbToQ16(Volume1616);
-    // Windows 100% (0 dB) maps to the DSP maximum.
-    gain = (ULONG)(((ULONGLONG)gain * SOF_DSP_MAX_GAIN) >> 16);
-    g_SofIface.SetVolume(g_SofIface.Context, gain);
+    // Level relative to the endpoint's safe maximum: Windows 100% (0 dB) =
+    // 65536 = the maximum sofapl allows for that endpoint.
+    ULONG level = Mute ? 0 : SofDbToQ16(Volume1616);
+    g_SofIface.SetVolume(g_SofIface.Context, Endpoint, level);
 }
 
 #pragma code_seg()
-VOID SofReapplyMixerGain()
+VOID SofReapplyMixerGain(_In_ ULONG Endpoint)
 {
-    SofApplyMixerGain(g_SofVolume1616, g_SofMute);
+    if (Endpoint >= SOFAPL_EP_COUNT) return;
+    SofApplyMixerGain(Endpoint, g_SofVolume1616[Endpoint], g_SofMute[Endpoint]);
 }
 
 //-----------------------------------------------------------------------------

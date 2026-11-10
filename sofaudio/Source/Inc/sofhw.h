@@ -8,13 +8,21 @@
 extern SOFAPL_AUDIO_INTERFACE g_SofIface;
 extern BOOLEAN g_SofIfaceValid;
 
-// Gain the DSP uses when Windows' volume is at 100% (0 dB). sofapl also caps
-// at this value (-6 dB, Q1.16).
-#define SOF_DSP_MAX_GAIN 32768u
+// Topology volume/mute node storage: the adapter keeps one array for all
+// filters, so each endpoint's nodes are stored at an offset.
+//   speaker   : volume 0,  mute 1
+//   headphone : volume 10, mute 11
+#define SOF_NODE_OFFSET_HEADPHONE  10
+#define SOF_NODE_VOLUME            0
+#define SOF_NODE_MUTE              1
 
-// Apply the topology volume (KS units: 1/65536 dB, <= 0) and mute to the DSP.
-// PASSIVE_LEVEL.
-VOID SofApplyMixerGain(_In_ LONG Volume1616, _In_ BOOL Mute);
+// Map a stored node index back to its DSP endpoint.
+#define SOF_NODE_TO_ENDPOINT(n) (((n) >= SOF_NODE_OFFSET_HEADPHONE) ? SOFAPL_EP_HEADPHONE : SOFAPL_EP_SPEAKER)
+#define SOF_ENDPOINT_NODE_BASE(e) (((e) == SOFAPL_EP_HEADPHONE) ? SOF_NODE_OFFSET_HEADPHONE : 0)
 
-// Re-apply the last volume/mute (used when a stream opens). PASSIVE_LEVEL.
-VOID SofReapplyMixerGain();
+// Apply the topology volume (KS units: 1/65536 dB, <= 0) and mute of an
+// endpoint to the DSP. PASSIVE_LEVEL.
+VOID SofApplyMixerGain(_In_ ULONG Endpoint, _In_ LONG Volume1616, _In_ BOOL Mute);
+
+// Re-apply the last volume/mute of an endpoint (used when a stream opens).
+VOID SofReapplyMixerGain(_In_ ULONG Endpoint);

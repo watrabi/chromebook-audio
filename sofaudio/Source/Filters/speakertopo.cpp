@@ -18,6 +18,7 @@ Abstract:
 #include "mintopo.h"
 #include "speakertopo.h"
 #include "speakertoptable.h"
+#include "headphonetoptable.h"
 
 
 #pragma code_seg("PAGE")
@@ -114,5 +115,65 @@ Return Value:
 
     return pMiniport->PropertyHandlerGeneric(PropertyRequest);
 } // PropertyHandler_SpeakerTopology
+
+#pragma code_seg()
+
+//=============================================================================
+// SOF: headphone endpoint handlers (same as the speaker ones, but report the
+// 3.5 mm jack description from headphonetoptable.h)
+//=============================================================================
+#pragma code_seg("PAGE")
+NTSTATUS
+PropertyHandler_HeadphoneTopoFilter
+(
+    _In_ PPCPROPERTY_REQUEST      PropertyRequest
+)
+{
+    PAGED_CODE();
+
+    ASSERT(PropertyRequest);
+
+    NTSTATUS            ntStatus = STATUS_INVALID_DEVICE_REQUEST;
+    PCMiniportTopology  pMiniport = (PCMiniportTopology)PropertyRequest->MajorTarget;
+
+    if (IsEqualGUIDAligned(*PropertyRequest->PropertyItem->Set, KSPROPSETID_Jack))
+    {
+        if (PropertyRequest->PropertyItem->Id == KSPROPERTY_JACK_DESCRIPTION)
+        {
+            ntStatus = pMiniport->PropertyHandlerJackDescription(
+                PropertyRequest,
+                ARRAYSIZE(HeadphoneJackDescriptions),
+                HeadphoneJackDescriptions
+                );
+        }
+        else if (PropertyRequest->PropertyItem->Id == KSPROPERTY_JACK_DESCRIPTION2)
+        {
+            ntStatus = pMiniport->PropertyHandlerJackDescription2(
+                PropertyRequest,
+                ARRAYSIZE(HeadphoneJackDescriptions),
+                HeadphoneJackDescriptions,
+                0 // jack capabilities
+                );
+        }
+    }
+
+    return ntStatus;
+} // PropertyHandler_HeadphoneTopoFilter
+
+#pragma code_seg("PAGE")
+NTSTATUS
+PropertyHandler_HeadphoneTopology
+(
+    _In_ PPCPROPERTY_REQUEST      PropertyRequest
+)
+{
+    PAGED_CODE();
+
+    ASSERT(PropertyRequest);
+
+    PCMiniportTopology pMiniport = (PCMiniportTopology)PropertyRequest->MajorTarget;
+
+    return pMiniport->PropertyHandlerGeneric(PropertyRequest);
+} // PropertyHandler_HeadphoneTopology
 
 #pragma code_seg()

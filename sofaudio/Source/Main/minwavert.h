@@ -186,6 +186,9 @@ public:
     );   
 
 public:
+    // SOF: which DSP endpoint this wave filter drives
+    eDeviceType GetDeviceType() { return m_DeviceType; }
+
 public:
     NTSTATUS PropertyHandlerProposedFormat
     (
@@ -228,7 +231,7 @@ protected:
 #pragma code_seg()
     BOOL IsRenderDevice()
     {
-        return m_DeviceType == eSpeakerDevice ? TRUE : FALSE;
+        return (m_DeviceType == eSpeakerDevice || m_DeviceType == eHeadphoneDevice) ? TRUE : FALSE;
     }
 
     BOOL IsSystemRenderPin(ULONG nPinId);

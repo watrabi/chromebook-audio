@@ -16,6 +16,7 @@ Abstract:
 
 #include "speakertopo.h"
 #include "speakertoptable.h"
+#include "headphonetoptable.h"
 #include "speakerwavtable.h"
 
 #include "micarraytopo.h"
@@ -95,6 +96,44 @@ ENDPOINT_MINIPAIR SpeakerMiniports =
 };
 
 //
+// SOF: headphone render endpoint (DA7219 on SSP1). Same wave filter and
+// formats as the speaker; its own topology filter reports a 3.5 mm
+// headphone jack.
+//
+static
+PHYSICALCONNECTIONTABLE HeadphoneTopologyPhysicalConnections[] =
+{
+    {
+        KSPIN_TOPO_WAVEOUT_SOURCE,  // TopologyIn
+        KSPIN_WAVE_RENDER3_SOURCE,   // WaveOut
+        CONNECTIONTYPE_WAVE_OUTPUT
+    }
+};
+
+static
+ENDPOINT_MINIPAIR HeadphoneMiniports =
+{
+    eHeadphoneDevice,
+    L"TopologyHeadphone",                                   // must match KSNAME_TopologyHeadphone in the inf
+    NULL,
+    CreateMiniportTopologySimpleAudioSample,
+    &HeadphoneTopoMiniportFilterDescriptor,
+    0, NULL,
+    L"WaveHeadphone",                                       // must match KSNAME_WaveHeadphone in the inf
+    NULL,
+    CreateMiniportWaveRTSimpleAudioSample,
+    &SpeakerWaveMiniportFilterDescriptor,
+    0,
+    NULL,
+    SPEAKER_DEVICE_MAX_CHANNELS,
+    SpeakerPinDeviceFormatsAndModes,
+    SIZEOF_ARRAY(SpeakerPinDeviceFormatsAndModes),
+    HeadphoneTopologyPhysicalConnections,
+    SIZEOF_ARRAY(HeadphoneTopologyPhysicalConnections),
+    ENDPOINT_NO_FLAGS,
+};
+
+//
 // Capture miniports.
 //
 
@@ -151,6 +190,7 @@ static
 PENDPOINT_MINIPAIR  g_RenderEndpoints[] = 
 {
     &SpeakerMiniports,
+    &HeadphoneMiniports,
 };
 
 #define g_cRenderEndpoints  (SIZEOF_ARRAY(g_RenderEndpoints))

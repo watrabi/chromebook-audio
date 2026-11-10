@@ -60,6 +60,14 @@ static NTSTATUS SofAllocBuffer
 #pragma code_seg()
 
 //=============================================================================
+// DSP endpoint driven by this stream (speaker or headphone wave filter).
+#pragma code_seg()
+ULONG CMiniportWaveRTStream::SofEndpoint()
+{
+    return (m_pMiniport && m_pMiniport->GetDeviceType() == eHeadphoneDevice) ? SOFAPL_EP_HEADPHONE : SOFAPL_EP_SPEAKER;
+}
+
+//=============================================================================
 // Open (once per buffer) and start the DSP stream. PASSIVE_LEVEL.
 #pragma code_seg()
 NTSTATUS CMiniportWaveRTStream::SofStartStream()
@@ -82,7 +90,7 @@ NTSTATUS CMiniportWaveRTStream::SofStartStream()
             period = m_ulDmaBufferSize / 2;
         }
 
-        st = g_SofIface.StreamOpen(g_SofIface.Context, m_SofBufPhys, m_ulDmaBufferSize, period);
+        st = g_SofIface.StreamOpen(g_SofIface.Context, SofEndpoint(), m_SofBufPhys, m_ulDmaBufferSize, period);
         if (!NT_SUCCESS(st))
         {
             return st;
@@ -91,12 +99,12 @@ NTSTATUS CMiniportWaveRTStream::SofStartStream()
         m_ulSofLastHwPos = 0;
 
         // Apply the current Windows volume/mute to the DSP.
-        SofReapplyMixerGain();
+        SofReapplyMixerGain(SofEndpoint());
     }
 
     if (!m_bSofRunning)
     {
-        st = g_SofIface.StreamTrigger(g_SofIface.Context, TRUE);
+        st = g_SofIface.StreamTrigger(g_SofIface.Context, SofEndpoint(), TRUE);
         if (!NT_SUCCESS(st))
         {
             return st;
@@ -116,7 +124,7 @@ VOID CMiniportWaveRTStream::SofCloseStream()
         return;
     }
     // StreamClose stops the stream first if it is still running.
-    g_SofIface.StreamClose(g_SofIface.Context);
+    g_SofIface.StreamClose(g_SofIface.Context, SofEndpoint());
     m_bSofOpen = FALSE;
     m_bSofRunning = FALSE;
     m_ulSofLastHwPos = 0;
@@ -132,7 +140,7 @@ ULONG CMiniportWaveRTStream::SofHwDisplacement()
     {
         return 0;
     }
-    ULONG hw = g_SofIface.StreamPosition(g_SofIface.Context);
+    ULONG hw = g_SofIface.StreamPosition(g_SofIface.Context, SofEndpoint());
     if (hw >= m_ulDmaBufferSize)
     {
         hw %= m_ulDmaBufferSize;
@@ -1355,7 +1363,7 @@ NTSTATUS CMiniportWaveRTStream::SetState
                 // SOF: stop the DSP stream (keeps it open for a later RUN)
                 if (!m_bCapture && m_bSofRunning && g_SofIfaceValid)
                 {
-                    g_SofIface.StreamTrigger(g_SofIface.Context, FALSE);
+                    g_SofIface.StreamTrigger(g_SofIface.Context, SofEndpoint(), FALSE);
                     m_bSofRunning = FALSE;
                 }
 

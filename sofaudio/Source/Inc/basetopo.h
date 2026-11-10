@@ -30,6 +30,7 @@ class CMiniportTopologySimpleAudioSample
     PPCFILTER_DESCRIPTOR        m_FilterDescriptor;     // Filter descriptor.
     PPORTEVENTS                 m_PortEvents;           // Event interface.
     USHORT                      m_DeviceMaxChannels;    // Max device channels.
+    eDeviceType                 m_SofDeviceType = eSpeakerDevice;  // SOF: set by CMiniportTopology
 
   public:
     CMiniportTopologySimpleAudioSample(

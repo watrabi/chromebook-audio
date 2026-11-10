@@ -52,6 +52,7 @@ public:
       m_DeviceType(DeviceType),
       m_DeviceContext(DeviceContext)
     {
+        m_SofDeviceType = DeviceType;
     }
 
     ~CMiniportTopology();
