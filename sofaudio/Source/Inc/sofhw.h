@@ -8,6 +8,13 @@
 extern SOFAPL_AUDIO_INTERFACE g_SofIface;
 extern BOOLEAN g_SofIfaceValid;
 
-// Initial DSP gain applied when a stream opens: -20 dB (Q1.16).
-// Windows' own volume slider is applied on top of this by the audio engine.
-#define SOF_STREAM_DSP_GAIN 6554u
+// Gain the DSP uses when Windows' volume is at 100% (0 dB). sofapl also caps
+// at this value (-6 dB, Q1.16).
+#define SOF_DSP_MAX_GAIN 32768u
+
+// Apply the topology volume (KS units: 1/65536 dB, <= 0) and mute to the DSP.
+// PASSIVE_LEVEL.
+VOID SofApplyMixerGain(_In_ LONG Volume1616, _In_ BOOL Mute);
+
+// Re-apply the last volume/mute (used when a stream opens). PASSIVE_LEVEL.
+VOID SofReapplyMixerGain();

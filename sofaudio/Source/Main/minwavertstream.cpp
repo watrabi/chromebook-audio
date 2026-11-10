@@ -90,8 +90,8 @@ NTSTATUS CMiniportWaveRTStream::SofStartStream()
         m_bSofOpen = TRUE;
         m_ulSofLastHwPos = 0;
 
-        // Conservative DSP gain; Windows' volume is applied on top in software.
-        g_SofIface.SetVolume(g_SofIface.Context, SOF_STREAM_DSP_GAIN);
+        // Apply the current Windows volume/mute to the DSP.
+        SofReapplyMixerGain();
     }
 
     if (!m_bSofRunning)

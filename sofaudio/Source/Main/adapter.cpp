@@ -58,6 +58,44 @@ UNICODE_STRING g_RegistryPath;      // This is used to store the registry settin
 SOFAPL_AUDIO_INTERFACE g_SofIface;
 BOOLEAN g_SofIfaceValid = FALSE;
 
+// Last volume/mute from the topology filter (0 dB, unmuted until Windows sets it)
+static LONG g_SofVolume1616 = 0;
+static BOOL g_SofMute = FALSE;
+
+// dB (16.16 fixed point, <= 0) -> linear gain Q1.16, integer only.
+// 0.5 dB steps: each step multiplies by 10^(-0.5/20) = 0.944060876 (Q32 4054710589).
+#pragma code_seg()
+static ULONG SofDbToQ16(LONG volume1616)
+{
+    if (volume1616 >= 0) return 0x10000;
+    ULONG halfDbSteps = (ULONG)(-(LONGLONG)volume1616 / 0x8000);
+    if (halfDbSteps >= 192) return 0;     // -96 dB and below: silent
+    ULONGLONG g = 0x10000ULL << 16;       // 1.0 in Q32
+    for (ULONG i = 0; i < halfDbSteps; i++) {
+        g = (g * 4054710589ULL) >> 32;
+    }
+    return (ULONG)(g >> 16);
+}
+
+#pragma code_seg()
+VOID SofApplyMixerGain(_In_ LONG Volume1616, _In_ BOOL Mute)
+{
+    g_SofVolume1616 = Volume1616;
+    g_SofMute = Mute;
+    if (!g_SofIfaceValid) return;
+
+    ULONG gain = Mute ? 0 : SofDbToQ16(Volume1616);
+    // Windows 100% (0 dB) maps to the DSP maximum.
+    gain = (ULONG)(((ULONGLONG)gain * SOF_DSP_MAX_GAIN) >> 16);
+    g_SofIface.SetVolume(g_SofIface.Context, gain);
+}
+
+#pragma code_seg()
+VOID SofReapplyMixerGain()
+{
+    SofApplyMixerGain(g_SofVolume1616, g_SofMute);
+}
+
 //-----------------------------------------------------------------------------
 // Query GUID_SOFAPL_AUDIO_INTERFACE from the SOFAPL\Speaker PDO (sofapl).
 //-----------------------------------------------------------------------------

@@ -18,6 +18,7 @@ Abstract:
 #include "hw.h"
 #include "savedata.h"
 #include "endpoints.h"
+#include "sofhw.h"
 
 //-----------------------------------------------------------------------------
 // CSaveData statics
@@ -1072,6 +1073,8 @@ Return Value:
     if (m_pHW)
     {
         m_pHW->SetMixerMute(Index, Channel, Value);
+        // SOF: speaker topology has volume node 0 and mute node 1
+        SofApplyMixerGain(m_pHW->GetMixerVolume(0, 0), Value);
     }
 } // MixerMuteWrite
 
@@ -1202,6 +1205,8 @@ Return Value:
     if (m_pHW)
     {
         m_pHW->SetMixerVolume(Index, Channel, Value);
+        // SOF: speaker topology has volume node 0 and mute node 1
+        SofApplyMixerGain(Value, m_pHW->GetMixerMute(1, 0));
     }
 } // MixerVolumeWrite
 
