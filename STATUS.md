@@ -57,12 +57,13 @@ Install order on a fresh system: sklhdaudbus, da7219, max98357a, sofapl, sofaudi
 - [x] M3b: streaming. The speaker sounds clean (confirmed 2026-11-10).
 - [x] Windows volume/mute drive the DSP gain. Speaker: opens at -20 dB, 100% = -6 dB cap.
 - [~] Headphones: pipeline 2 on SSP1/DA7219, its own endpoint, capped at -18 dB because the DA7219 headphone amp runs at +6 dB. Also fixes garbled audio after pause/resume. Commit `bece339`, built but **not yet tested on hardware**.
+- [~] Internal mic: pipeline 4, DMIC0 → buffer → PGA → buffer → host (capture), S32_LE 48 kHz stereo, PDM controller 0 with mics A+B. The PGA isn't in the Linux topology; we added it for Windows mic level/mute (100% = +20 dB, 0 dB at boot). sofapl 0.7.0 / sofaudio 0.6.0. Capture position comes from the HDA position buffer after a dummy DPIB read (Linux does this). **Not yet tested on hardware**; the BootLog line "Pipelines: … mic ready/FAILED" shows whether the firmware accepted it.
 
 ## Next
 
 1. Test the headphone build (start at low volume) and the pause/resume fix.
 2. Switch automatically between speaker and headphones on jack detect.
-3. Microphone capture.
+3. Test internal mic capture. Later: headset mic (pipeline 3, SSP1 capture; needs the DA7219 mic path enabled).
 4. Consider raising the -6 dB speaker cap.
 
 ## Safety rule

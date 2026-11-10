@@ -60,8 +60,8 @@ BOOLEAN g_SofIfaceValid = FALSE;
 
 // Last volume/mute per endpoint from the topology filters
 // (0 dB, unmuted until Windows sets them)
-static LONG g_SofVolume1616[SOFAPL_EP_COUNT] = { 0, 0 };
-static BOOL g_SofMute[SOFAPL_EP_COUNT] = { FALSE, FALSE };
+static LONG g_SofVolume1616[SOFAPL_EP_COUNT] = { 0, 0, 0 };
+static BOOL g_SofMute[SOFAPL_EP_COUNT] = { FALSE, FALSE, FALSE };
 
 // dB (16.16 fixed point, <= 0) -> linear gain Q1.16, integer only.
 // 0.5 dB steps: each step multiplies by 10^(-0.5/20) = 0.944060876 (Q32 4054710589).
@@ -763,12 +763,9 @@ InstallAllCaptureFilters(
 
     PAGED_CODE();
 
-    // SOF: g_cCaptureEndpoints is 0 for now; compare against a runtime value
-    // so the "always false" warning (C4296, treated as error) does not fire.
-    volatile ULONG captureCount = g_cCaptureEndpoints;
     ntStatus = STATUS_SUCCESS;
 
-    for (ULONG i = 0; i < captureCount; ++i, ++ppAeMiniports)
+    for (ULONG i = 0; i < g_cCaptureEndpoints; ++i, ++ppAeMiniports)
     {
         ntStatus = InstallEndpointCaptureFilters(_pDeviceObject, _pIrp, _pAdapterCommon, *ppAeMiniports);
         IF_FAILED_JUMP(ntStatus, Exit);

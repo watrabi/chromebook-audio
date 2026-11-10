@@ -20,7 +20,7 @@ Abstract:
 // Defines
 //=============================================================================
 // BUGBUG we should dynamically allocate this...
-#define MAX_TOPOLOGY_NODES      20
+#define MAX_TOPOLOGY_NODES      32  // SOF: endpoints store nodes at offsets 0, 10, 20
 
 //=============================================================================
 // Classes

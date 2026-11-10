@@ -60,10 +60,14 @@ static NTSTATUS SofAllocBuffer
 #pragma code_seg()
 
 //=============================================================================
-// DSP endpoint driven by this stream (speaker or headphone wave filter).
+// DSP endpoint driven by this stream (speaker, headphone or mic wave filter).
 #pragma code_seg()
 ULONG CMiniportWaveRTStream::SofEndpoint()
 {
+    if (m_bCapture)
+    {
+        return SOFAPL_EP_MIC;
+    }
     return (m_pMiniport && m_pMiniport->GetDeviceType() == eHeadphoneDevice) ? SOFAPL_EP_HEADPHONE : SOFAPL_EP_SPEAKER;
 }
 
@@ -80,7 +84,7 @@ NTSTATUS CMiniportWaveRTStream::SofStartStream()
     NTSTATUS st;
     if (!m_bSofOpen)
     {
-        ULONG period = 1920;   // 10 ms of 48 kHz S16 stereo
+        ULONG period = m_ulDmaMovementRate / 100;   // 10 ms
         if (m_ulNotificationsPerBuffer > 0)
         {
             period = m_ulDmaBufferSize / m_ulNotificationsPerBuffer;
@@ -119,7 +123,7 @@ NTSTATUS CMiniportWaveRTStream::SofStartStream()
 #pragma code_seg()
 VOID CMiniportWaveRTStream::SofCloseStream()
 {
-    if (m_bCapture || !g_SofIfaceValid || !m_bSofOpen)
+    if (!g_SofIfaceValid || !m_bSofOpen)
     {
         return;
     }
@@ -132,7 +136,8 @@ VOID CMiniportWaveRTStream::SofCloseStream()
 }
 
 //=============================================================================
-// Bytes the DSP DMA consumed since the last call. Any IRQL <= DISPATCH_LEVEL.
+// Bytes the DSP DMA moved (read for render, written for capture) since the
+// last call. Any IRQL <= DISPATCH_LEVEL.
 #pragma code_seg()
 ULONG CMiniportWaveRTStream::SofHwDisplacement()
 {
@@ -1361,7 +1366,7 @@ NTSTATUS CMiniportWaveRTStream::SetState
                 //
 
                 // SOF: stop the DSP stream (keeps it open for a later RUN)
-                if (!m_bCapture && m_bSofRunning && g_SofIfaceValid)
+                if (m_bSofRunning && g_SofIfaceValid)
                 {
                     g_SofIface.StreamTrigger(g_SofIface.Context, SofEndpoint(), FALSE);
                     m_bSofRunning = FALSE;
@@ -1395,13 +1400,10 @@ NTSTATUS CMiniportWaveRTStream::SetState
 
         case KSSTATE_RUN:
             // SOF: open (first time) and start the DSP stream
-            if (!m_bCapture)
+            ntStatus = SofStartStream();
+            if (!NT_SUCCESS(ntStatus))
             {
-                ntStatus = SofStartStream();
-                if (!NT_SUCCESS(ntStatus))
-                {
-                    return ntStatus;
-                }
+                return ntStatus;
             }
 
             // Start DMA
@@ -1484,9 +1486,9 @@ VOID CMiniportWaveRTStream::UpdatePosition
     ULONG ByteDisplacement = ((m_ulDmaMovementRate * TimeElapsedInMS) + m_byteDisplacementCarryForward) / 1000 ;
     m_byteDisplacementCarryForward = ((m_ulDmaMovementRate * TimeElapsedInMS) + m_byteDisplacementCarryForward) % 1000;
 
-    // SOF: for render, use how far the DSP DMA actually moved instead of the
-    // time-based estimate above.
-    if (!m_bCapture && m_bSofOpen)
+    // SOF: use how far the DSP DMA actually moved instead of the time-based
+    // estimate above (render: bytes read, capture: bytes written).
+    if (m_bSofOpen)
     {
         ByteDisplacement = SofHwDisplacement();
     }
@@ -1496,8 +1498,12 @@ VOID CMiniportWaveRTStream::UpdatePosition
 
     if (m_bCapture)
     {
-        // Write sine wave to buffer.
-        WriteBytes(ByteDisplacement);
+        // SOF: the DSP writes the mic data straight into the buffer. Only
+        // fall back to the sample's tone when no DSP stream is open.
+        if (!m_bSofOpen)
+        {
+            WriteBytes(ByteDisplacement);
+        }
     }
     else
     {
@@ -1740,10 +1746,11 @@ TimerNotifyRT
     // Calculate the time elapsed since the last we ran DPC that matched Notification interval. Note that the division by 10000 
     // to convert to milliseconds may cause us to lose some of the time, so we will carry the remainder forward.
 
-    if (!_this->m_bCapture && _this->m_bSofOpen && _this->m_ulNotificationsPerBuffer > 0)
+    if (_this->m_bSofOpen && _this->m_ulNotificationsPerBuffer > 0)
     {
         // SOF: drive notifications from the real DMA position. Advance the
-        // position every tick and signal once per packet actually consumed.
+        // position every tick and signal once per packet actually consumed
+        // (render) or filled (capture).
         _this->UpdatePosition(qpc);
 
         ULONG packetSize = _this->m_ulDmaBufferSize / _this->m_ulNotificationsPerBuffer;

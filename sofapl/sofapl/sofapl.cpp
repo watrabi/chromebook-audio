@@ -547,24 +547,38 @@ static NTSTATUS IpcTxLocked(PDEVICE_CONTEXT ctx, PCWSTR what, const VOID* msg, U
 }
 
 // ---------------------------------------------------------------------------
-// Playback endpoints, from sof-apl-da7219.tplg (decoded, see README):
+// Endpoints, from sof-apl-da7219.tplg (decoded, see README):
 //   speaker   : pipeline 1  PCM0P -> BUF1.0 -> PGA1.0 -> BUF1.1 -> SSP5 (MAX98357A)
 //               SSP5: I2S, 19.2 MHz MCLK, 1.536 MHz BCLK, 2 x 16-bit slots
 //   headphone : pipeline 2  PCM1P -> BUF2.0 -> PGA2.0 -> BUF2.1 -> SSP1 (DA7219)
 //               SSP1: I2S, 19.2 MHz MCLK, 1.920 MHz BCLK, 2 x 20-bit slots
-// Both: 1 ms timer-scheduled pipeline, 768-byte buffers, s32le volume with a
-// 20 ms linear zero-crossing ramp, 16-bit DAI, codec consumes BCLK/FSYNC.
+//   mic       : pipeline 4  DMIC0 -> BUF -> PGA -> BUF -> PCM99C (capture)
+//               DMIC0: PDM controller 0, mics A+B, 2.4-4.8 MHz clock,
+//               40-60 % duty, 48 kHz, 32-bit FIFO, 400 ms unmute ramp.
+//               The Linux topology has no volume on this pipeline; we add
+//               one (as the SOF pipe-volume-capture topologies do) so Windows
+//               mic level/mute work.
+// All: 1 ms timer-scheduled pipeline, 768-byte buffers, s32le volume.
+// Playback: 16-bit DAI, codec consumes BCLK/FSYNC. Capture: 32-bit DMIC.
 // ---------------------------------------------------------------------------
 
 typedef struct _EP_DESC {
     PCWSTR Name;
     UINT32 PipeId;
     UINT32 CompBase;        // host +0, buf0 +1, pga +2, buf1 +3, dai +4, pipe +5
-    UINT32 SspIndex;        // SSP port, also the DAI index
-    UINT32 BclkRate;
-    UINT16 SlotWidth;
+    UINT32 Direction;       // SOF_IPC_STREAM_PLAYBACK / _CAPTURE
+    UINT32 DaiType;         // SOF_DAI_INTEL_SSP / _DMIC
+    UINT32 DaiIndex;        // SSP port or DMIC FIFO
+    UINT32 BclkRate;        // SSP only
+    UINT16 SlotWidth;       // SSP only
+    UINT32 FrameFmt;        // DAI and host stream format (SOF_IPC_FRAME_*)
+    UINT32 SampleBytes;     // container bytes per sample in the host buffer
+    USHORT HdaFormat;       // HDA SDnFMT for the host DMA stream
     ULONG MaxGain;          // Q1.16 gain at 100% Windows volume (safety cap)
-    INT32 CsAudioType;      // CoolStar endpoint type for amp/codec drivers
+    ULONG InitialGain;      // Q1.16 gain set when the pipeline is created
+    UINT32 Ramp;            // volume ramp type
+    UINT32 RampMs;          // volume ramp length
+    INT32 CsAudioType;      // CoolStar endpoint type for amp/codec drivers, -1 = none
 } EP_DESC;
 
 #define EP_HOST(e)  (g_Ep[e].CompBase + 0)
@@ -578,16 +592,29 @@ typedef struct _EP_DESC {
 enum { CSAudioEndpointTypeDSP = 0, CSAudioEndpointTypeSpeaker = 1, CSAudioEndpointTypeHeadphone = 2 };
 enum { CSAudioEndpointRegister = 0, CSAudioEndpointStart = 1, CSAudioEndpointStop = 2 };
 
+// HDA SDnFMT: 48 kHz base rate, BITS (6:4) 1 = 16-bit / 4 = 32-bit, channels - 1
+#define HDA_FMT_48K_16BIT_2CH  0x0011
+#define HDA_FMT_48K_32BIT_2CH  0x0041
+
+// Playback volume right after the pipeline is created: -40 dB
+#define EP_INITIAL_GAIN_PLAYBACK 655u
+
 static const EP_DESC g_Ep[SOFAPL_EP_COUNT] = {
     // speaker: up to -6 dB in the DSP
-    { L"speaker",   1, 1,  5, 1536000, 16, 32768, CSAudioEndpointTypeSpeaker },
+    { L"speaker",   1, 1,  SOF_IPC_STREAM_PLAYBACK, SOF_DAI_INTEL_SSP, 5, 1536000, 16,
+      SOF_IPC_FRAME_S16_LE, 2, HDA_FMT_48K_16BIT_2CH,
+      32768, EP_INITIAL_GAIN_PLAYBACK, SOF_VOLUME_LINEAR_ZC, 20, CSAudioEndpointTypeSpeaker },
     // headphone: the DA7219 HP amp is set to +6 dB by its driver, so cap the
     // DSP much lower for ear safety: up to -18 dB
-    { L"headphone", 2, 11, 1, 1920000, 20, 8250,  CSAudioEndpointTypeHeadphone },
+    { L"headphone", 2, 11, SOF_IPC_STREAM_PLAYBACK, SOF_DAI_INTEL_SSP, 1, 1920000, 20,
+      SOF_IPC_FRAME_S16_LE, 2, HDA_FMT_48K_16BIT_2CH,
+      8250,  EP_INITIAL_GAIN_PLAYBACK, SOF_VOLUME_LINEAR_ZC, 20, CSAudioEndpointTypeHeadphone },
+    // internal mic: DMIC data is quiet, so allow up to +20 dB (10x) of digital
+    // gain at 100% Windows mic level; start at 0 dB.
+    { L"mic",       4, 21, SOF_IPC_STREAM_CAPTURE,  SOF_DAI_INTEL_DMIC, 0, 0, 0,
+      SOF_IPC_FRAME_S32_LE, 4, HDA_FMT_48K_32BIT_2CH,
+      655360, SOF_VOL_0DB, SOF_VOLUME_LINEAR, 250, -1 },
 };
-
-// Volume right after the pipeline is created: -40 dB
-#define EP_INITIAL_GAIN 655u
 
 static const UINT8 UUID_HOST[16] = { 0x0c,0x10,0x9d,0x8b,0x78,0x6d,0x8f,0x41,0x90,0xa3,0xe0,0xe8,0x05,0xd0,0x85,0x2b };
 static const UINT8 UUID_PGA[16]  = { 0x7e,0x67,0x7e,0xb7,0xf4,0x5f,0x88,0x41,0xaf,0x14,0xfb,0xa8,0xbd,0xbf,0x86,0x82 };
@@ -633,8 +660,9 @@ static NTSTATUS EpSetGain(PDEVICE_CONTEXT ctx, ULONG e, ULONG gainQ16)
         m.chanv[i].channel = i;
         m.chanv[i].value = gainQ16;
     }
-    return IpcTx(ctx, (e == SOFAPL_EP_SPEAKER) ? L"speaker volume" : L"headphone volume",
-        &m, sizeof(m), NULL, 0);
+    WCHAR what[32];
+    RtlStringCchPrintfW(what, ARRAYSIZE(what), L"%s volume", g_Ep[e].Name);
+    return IpcTx(ctx, what, &m, sizeof(m), NULL, 0);
 }
 
 // Creates pipeline e in the firmware. Nothing is started: no PCM params, no
@@ -642,6 +670,7 @@ static NTSTATUS EpSetGain(PDEVICE_CONTEXT ctx, ULONG e, ULONG gainQ16)
 static NTSTATUS EpSetupPipeline(PDEVICE_CONTEXT ctx, ULONG e)
 {
     const EP_DESC* d = &g_Ep[e];
+    const BOOLEAN capture = (d->Direction == SOF_IPC_STREAM_CAPTURE);
     NTSTATUS st;
 
     // 1. pipeline, scheduled by the DAI component
@@ -670,10 +699,10 @@ static NTSTATUS EpSetupPipeline(PDEVICE_CONTEXT ctx, ULONG e)
         RtlZeroMemory(&m, sizeof(m));
         InitComp(&m.comp, sizeof(m), EP_HOST(e), SOF_COMP_HOST, d->PipeId, TRUE);
         m.config.hdr.size = sizeof(m.config);
-        m.config.periods_sink = 2;
-        m.config.periods_source = 0;
+        m.config.periods_sink = capture ? 0 : 2;
+        m.config.periods_source = capture ? 2 : 0;
         m.config.frame_fmt = SOF_IPC_FRAME_S16_LE;   // no format token: 0
-        m.direction = SOF_IPC_STREAM_PLAYBACK;
+        m.direction = d->Direction;
         RtlCopyMemory(m.ext.uuid, UUID_HOST, 16);
         st = IpcTx(ctx, L"host comp", &m, sizeof(m), NULL, 0);
         if (!NT_SUCCESS(st)) return st;
@@ -706,36 +735,44 @@ static NTSTATUS EpSetupPipeline(PDEVICE_CONTEXT ctx, ULONG e)
         m.config.frame_fmt = SOF_IPC_FRAME_S32_LE;
         m.channels = 2;
         m.min_value = 0;
-        m.max_value = SOF_VOL_0DB;
-        m.ramp = SOF_VOLUME_LINEAR_ZC;
-        m.initial_ramp = 20;
+        m.max_value = max(d->MaxGain, (ULONG)SOF_VOL_0DB);
+        m.ramp = d->Ramp;
+        m.initial_ramp = d->RampMs;
         RtlCopyMemory(m.ext.uuid, UUID_PGA, 16);
         st = IpcTx(ctx, L"volume comp", &m, sizeof(m), NULL, 0);
         if (!NT_SUCCESS(st)) return st;
     }
 
-    // 5. DAI component (SSPn, playback)
+    // 5. DAI component (SSPn playback or DMIC capture)
     {
         SOF_IPC_COMP_DAI m;
         RtlZeroMemory(&m, sizeof(m));
         InitComp(&m.comp, sizeof(m), EP_DAI(e), SOF_COMP_DAI, d->PipeId, TRUE);
         m.config.hdr.size = sizeof(m.config);
-        m.config.periods_sink = 0;
-        m.config.periods_source = 2;
-        m.config.frame_fmt = SOF_IPC_FRAME_S16_LE;
-        m.direction = SOF_IPC_STREAM_PLAYBACK;
-        m.dai_index = d->SspIndex;
-        m.type = SOF_DAI_INTEL_SSP;
+        m.config.periods_sink = capture ? 2 : 0;
+        m.config.periods_source = capture ? 0 : 2;
+        m.config.frame_fmt = d->FrameFmt;
+        m.direction = d->Direction;
+        m.dai_index = d->DaiIndex;
+        m.type = d->DaiType;
         RtlCopyMemory(m.ext.uuid, UUID_DAI, 16);
         st = IpcTx(ctx, L"dai comp", &m, sizeof(m), NULL, 0);
         if (!NT_SUCCESS(st)) return st;
     }
 
-    // 6. graph
-    if (!NT_SUCCESS(st = IpcConnect(ctx, EP_HOST(e), EP_BUF0(e)))) return st;
-    if (!NT_SUCCESS(st = IpcConnect(ctx, EP_BUF0(e), EP_PGA(e)))) return st;
-    if (!NT_SUCCESS(st = IpcConnect(ctx, EP_PGA(e), EP_BUF1(e)))) return st;
-    if (!NT_SUCCESS(st = IpcConnect(ctx, EP_BUF1(e), EP_DAI(e)))) return st;
+    // 6. graph: host -> buf0 -> pga -> buf1 -> dai for playback, reversed
+    //    (dai -> buf1 -> pga -> buf0 -> host) for capture
+    if (!capture) {
+        if (!NT_SUCCESS(st = IpcConnect(ctx, EP_HOST(e), EP_BUF0(e)))) return st;
+        if (!NT_SUCCESS(st = IpcConnect(ctx, EP_BUF0(e), EP_PGA(e)))) return st;
+        if (!NT_SUCCESS(st = IpcConnect(ctx, EP_PGA(e), EP_BUF1(e)))) return st;
+        if (!NT_SUCCESS(st = IpcConnect(ctx, EP_BUF1(e), EP_DAI(e)))) return st;
+    } else {
+        if (!NT_SUCCESS(st = IpcConnect(ctx, EP_DAI(e), EP_BUF1(e)))) return st;
+        if (!NT_SUCCESS(st = IpcConnect(ctx, EP_BUF1(e), EP_PGA(e)))) return st;
+        if (!NT_SUCCESS(st = IpcConnect(ctx, EP_PGA(e), EP_BUF0(e)))) return st;
+        if (!NT_SUCCESS(st = IpcConnect(ctx, EP_BUF0(e), EP_HOST(e)))) return st;
+    }
 
     // 7. pipeline complete
     {
@@ -748,19 +785,51 @@ static NTSTATUS EpSetupPipeline(PDEVICE_CONTEXT ctx, ULONG e)
         if (!NT_SUCCESS(st)) return st;
     }
 
-    // 8. low volume before anything can ever play
-    st = EpSetGain(ctx, e, EP_INITIAL_GAIN);
+    // 8. initial volume (low for playback, before anything can ever play)
+    st = EpSetGain(ctx, e, d->InitialGain);
     if (!NT_SUCCESS(st)) return st;
 
-    // 9. SSP configuration: I2S, SSP provides BCLK/FSYNC, 19.2 MHz MCLK,
-    //    2 slots. clks_control = 0: no early clocks.
+    // 9a. DMIC configuration (sof_link_dmic_load): driver version 1, PDM
+    //     controller 0 with both mics, values from the dmic01 topology tuples.
+    if (d->DaiType == SOF_DAI_INTEL_DMIC) {
+        SOF_IPC_DAI_CONFIG_MSG m;
+        RtlZeroMemory(&m, sizeof(m));
+        m.hdr.size = sizeof(m);
+        m.hdr.cmd = SOF_IPC_GLB_DAI_MSG | SOF_IPC_DAI_CONFIG;
+        m.type = SOF_DAI_INTEL_DMIC;
+        m.dai_index = d->DaiIndex;
+        m.format = 0;
+        m.group_id = 0;
+        m.flags = SOF_DAI_CONFIG_FLAGS_HW_PARAMS;
+        m.dmic.hdr.size = sizeof(m.dmic);
+        m.dmic.driver_ipc_version = 1;
+        m.dmic.pdmclk_min = 2400000;
+        m.dmic.pdmclk_max = 4800000;
+        m.dmic.fifo_fs = 48000;
+        m.dmic.fifo_bits = 32;
+        m.dmic.duty_min = 40;
+        m.dmic.duty_max = 60;
+        m.dmic.num_pdm_active = 1;
+        m.dmic.unmute_ramp_time = 400;
+        m.dmic.pdm[0].hdr.size = sizeof(m.dmic.pdm[0]);
+        m.dmic.pdm[0].id = 0;
+        m.dmic.pdm[0].enable_mic_a = 1;
+        m.dmic.pdm[0].enable_mic_b = 1;
+        st = IpcTx(ctx, L"dmic config", &m, sizeof(m), NULL, 0);
+        if (!NT_SUCCESS(st)) return st;
+        ctx->Ep[e].PipelineReady = TRUE;
+        return STATUS_SUCCESS;
+    }
+
+    // 9b. SSP configuration: I2S, SSP provides BCLK/FSYNC, 19.2 MHz MCLK,
+    //     2 slots. clks_control = 0: no early clocks.
     {
         SOF_IPC_DAI_CONFIG_MSG m;
         RtlZeroMemory(&m, sizeof(m));
         m.hdr.size = sizeof(m);
         m.hdr.cmd = SOF_IPC_GLB_DAI_MSG | SOF_IPC_DAI_CONFIG;
         m.type = SOF_DAI_INTEL_SSP;
-        m.dai_index = d->SspIndex;
+        m.dai_index = d->DaiIndex;
         m.format = SOF_DAI_FMT_I2S | SOF_DAI_FMT_NB_NF | SOF_DAI_FMT_CBC_CFC;
         m.group_id = 0;
         m.flags = SOF_DAI_CONFIG_FLAGS_HW_PARAMS;
@@ -795,13 +864,11 @@ static NTSTATUS EpSetupPipeline(PDEVICE_CONTEXT ctx, ULONG e)
 //   start: HDA host DMA run -> STREAM_TRIG_START -> codec/amp start notification
 //   stop:  codec/amp stop notification -> STREAM_TRIG_STOP -> HDA host DMA stop
 //   close: STREAM_PCM_FREE -> release HDA stream
-// Only S16_LE / 48 kHz / stereo is supported.
+// Only 48 kHz / stereo; S16_LE for playback, S32_LE for the DMIC capture.
 // ---------------------------------------------------------------------------
 
 #define EP_RATE        48000
 #define EP_CHANNELS    2
-#define EP_BYTES       2
-#define EP_HDA_FORMAT  0x0011   // 48 kHz base, 16-bit, 2 channels
 
 // Intel vendor-specific DPIB registers (include/sound/hda_register.h):
 // per-stream "DMA position in buffer" that reflects data actually transferred.
@@ -833,7 +900,7 @@ static int g_SofCsAudioTag = 1;
 
 static void CsAudioNotify(PDEVICE_CONTEXT ctx, INT32 endpointType, INT32 request)
 {
-    if (!ctx->CsAudioCallback) return;
+    if (!ctx->CsAudioCallback || endpointType < 0) return;
     CS_AUDIO_ARG arg;
     RtlZeroMemory(&arg, sizeof(arg));
     arg.argSz = sizeof(arg);
@@ -859,6 +926,8 @@ static void EpStreamRelease(PDEVICE_CONTEXT ctx, ULONG e)
 static NTSTATUS EpStreamOpen(PDEVICE_CONTEXT ctx, ULONG e, PHYSICAL_ADDRESS bufPhys, ULONG size, ULONG periodBytes)
 {
     EP_STATE* s = &ctx->Ep[e];
+    const EP_DESC* d = &g_Ep[e];
+    const BOOLEAN capture = (d->Direction == SOF_IPC_STREAM_CAPTURE);
     if (!s->PipelineReady) return STATUS_DEVICE_NOT_READY;
     if (s->Stream) return STATUS_DEVICE_BUSY;
     if (size < 512 || (size % 256) != 0 || (bufPhys.LowPart & 127)) return STATUS_INVALID_PARAMETER;
@@ -866,14 +935,16 @@ static NTSTATUS EpStreamOpen(PDEVICE_CONTEXT ctx, ULONG e, PHYSICAL_ADDRESS bufP
     HDAUDIO_STREAM_FORMAT fmt;
     RtlZeroMemory(&fmt, sizeof(fmt));
     fmt.SampleRate = EP_RATE;
-    fmt.ValidBitsPerSample = 16;
-    fmt.ContainerSize = 16;
+    fmt.ValidBitsPerSample = (USHORT)(d->SampleBytes * 8);
+    fmt.ContainerSize = (USHORT)(d->SampleBytes * 8);
     fmt.NumberOfChannels = EP_CHANNELS;
 
-    NTSTATUS st = ctx->Bus.GetRenderStream(ctx->Bus.Context, fmt, &s->Stream, &s->Tag);
+    NTSTATUS st = capture
+        ? ctx->Bus.GetCaptureStream(ctx->Bus.Context, fmt, &s->Stream, &s->Tag)
+        : ctx->Bus.GetRenderStream(ctx->Bus.Context, fmt, &s->Stream, &s->Tag);
     if (!NT_SUCCESS(st)) {
         s->Stream = NULL;
-        LogLine(ctx, L"%s GetRenderStream failed: 0x%08X", g_Ep[e].Name, st);
+        LogLine(ctx, L"%s Get%sStream failed: 0x%08X", d->Name, capture ? L"Capture" : L"Render", st);
         return st;
     }
 
@@ -898,12 +969,14 @@ static NTSTATUS EpStreamOpen(PDEVICE_CONTEXT ctx, ULONG e, PHYSICAL_ADDRESS bufP
     KeMemoryBarrier();
 
     // Apollo Lake: program the format with host/link DMA coupled.
+    // Stream descriptors: capture streams first (index = tag - 1), then
+    // playback streams (index = ISS + tag - 1).
     USHORT gcap = READ_REGISTER_USHORT((PUSHORT)(ctx->HdaBar.Base.baseptr + HDA_REG_GCAP));
-    s->Idx = ((gcap >> 8) & 0xF) + s->Tag - 1;
+    s->Idx = (capture ? 0 : ((gcap >> 8) & 0xF)) + s->Tag - 1;
     PULONG ppctl = (PULONG)(ctx->Ppcap + PP_REG_PPCTL);
     PUSHORT sdFmt = (PUSHORT)(ctx->HdaBar.Base.baseptr + HDA_SD_BASE + HDA_SD_STRIDE * s->Idx + HDA_SD_FORMAT);
     WRITE_REGISTER_ULONG(ppctl, READ_REGISTER_ULONG(ppctl) & ~PPCTL_PROCEN(s->Idx));
-    WRITE_REGISTER_USHORT(sdFmt, EP_HDA_FORMAT);
+    WRITE_REGISTER_USHORT(sdFmt, d->HdaFormat);
     WRITE_REGISTER_ULONG(ppctl, READ_REGISTER_ULONG(ppctl) | PPCTL_PROCEN(s->Idx));
 
     SOF_IPC_PCM_PARAMS m;
@@ -915,16 +988,16 @@ static NTSTATUS EpStreamOpen(PDEVICE_CONTEXT ctx, ULONG e, PHYSICAL_ADDRESS bufP
     m.params.buffer.phy_addr = 0;                 // no host page table on cAVS/HDA
     m.params.buffer.pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     m.params.buffer.size = size;
-    m.params.direction = SOF_IPC_STREAM_PLAYBACK;
-    m.params.frame_fmt = SOF_IPC_FRAME_S16_LE;
+    m.params.direction = d->Direction;
+    m.params.frame_fmt = d->FrameFmt;
     m.params.buffer_fmt = SOF_IPC_BUFFER_INTERLEAVED;
     m.params.rate = EP_RATE;
     m.params.stream_tag = s->Tag;
     m.params.channels = EP_CHANNELS;
-    m.params.sample_valid_bytes = EP_BYTES;
-    m.params.sample_container_bytes = EP_BYTES;
+    m.params.sample_valid_bytes = d->SampleBytes;
+    m.params.sample_container_bytes = d->SampleBytes;
     m.params.host_period_bytes = periodBytes;
-    m.params.no_stream_position = 1;              // position comes from DPIB
+    m.params.no_stream_position = 1;              // position comes from the HDA registers
 
     SOF_IPC_PCM_PARAMS_REPLY reply;
     RtlZeroMemory(&reply, sizeof(reply));
@@ -935,8 +1008,8 @@ static NTSTATUS EpStreamOpen(PDEVICE_CONTEXT ctx, ULONG e, PHYSICAL_ADDRESS bufP
     }
     s->ParamsSet = TRUE;
     s->Size = size;
-    LogLine(ctx, L"%s stream open: tag %u index %u, %u bytes, period %u",
-        g_Ep[e].Name, s->Tag, s->Idx, size, periodBytes);
+    LogLine(ctx, L"%s stream open: %s tag %u index %u, %u bytes, period %u",
+        d->Name, capture ? L"capture" : L"playback", s->Tag, s->Idx, size, periodBytes);
     return STATUS_SUCCESS;
 }
 
@@ -1005,16 +1078,26 @@ static void EpStreamStopForClose(PDEVICE_CONTEXT ctx, ULONG e)
 }
 
 // Linux (SOF_HDA_POSITION_QUIRK_USE_DPIB_REGISTERS, the default) reads the DPIB
-// register for playback instead of the DDR position buffer. Any IRQL.
+// register for playback instead of the DDR position buffer. For capture it
+// does a dummy DPIB read (flushes the DMA position) and then uses the position
+// buffer, since DPIB is not accurate for capture. Any IRQL.
 static ULONG EpStreamPosition(PDEVICE_CONTEXT ctx, ULONG e)
 {
     EP_STATE* s = &ctx->Ep[e];
-    if (!s->Stream || !ctx->HdaBar.Base.baseptr) return 0;
+    if (!s->Stream || !ctx->HdaBar.Base.baseptr || !s->Size) return 0;
     ULONG off = AZX_REG_VS_SDXDPIB_XBASE + AZX_REG_VS_SDXDPIB_XINTERVAL * s->Idx;
-    if (off + 4 > ctx->HdaBar.Len) {
-        return ctx->Bus.StreamPosition(ctx->Bus.Context, s->Stream);
+    BOOLEAN dpibOk = (off + 4 <= ctx->HdaBar.Len);
+    ULONG pos;
+    if (g_Ep[e].Direction == SOF_IPC_STREAM_CAPTURE) {
+        if (dpibOk) {
+            (void)READ_REGISTER_ULONG((PULONG)(ctx->HdaBar.Base.baseptr + off));
+        }
+        pos = ctx->Bus.StreamPosition(ctx->Bus.Context, s->Stream);
+    } else if (dpibOk) {
+        pos = READ_REGISTER_ULONG((PULONG)(ctx->HdaBar.Base.baseptr + off));
+    } else {
+        pos = ctx->Bus.StreamPosition(ctx->Bus.Context, s->Stream);
     }
-    ULONG pos = READ_REGISTER_ULONG((PULONG)(ctx->HdaBar.Base.baseptr + off));
     if (pos >= s->Size) pos = 0;
     return pos;
 }
@@ -1342,7 +1425,7 @@ NTSTATUS SofEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST, WDFCMRESLIST)
 {
     PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
     ctx->Log[0] = L'\0';
-    LogLine(ctx, L"sofapl 0.6.0 starting (speaker + headphone, pause/release)");
+    LogLine(ctx, L"sofapl 0.7.0 starting (speaker + headphone + DMIC capture)");
 
     NTSTATUS st = WdfFdoQueryForInterface(Device, &GUID_ADSP_BUS_INTERFACE,
         (PINTERFACE)&ctx->Bus, sizeof(ADSP_BUS_INTERFACE), 1, NULL);
@@ -1431,8 +1514,9 @@ NTSTATUS SofEvtD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE)
             if (e == SOFAPL_EP_SPEAKER) st = est;   // the speaker decides the stage
         }
         stage = NT_SUCCESS(st) ? L"pipelines-ready" : L"speaker-pipeline-failed";
-        LogLine(ctx, L"Pipelines: %s (0x%08X), headphone %s, %u IPCs, %u notifications",
+        LogLine(ctx, L"Pipelines: %s (0x%08X), headphone %s, mic %s, %u IPCs, %u notifications",
             stage, st, ctx->Ep[SOFAPL_EP_HEADPHONE].PipelineReady ? L"ready" : L"FAILED",
+            ctx->Ep[SOFAPL_EP_MIC].PipelineReady ? L"ready" : L"FAILED",
             ctx->IpcCount, ctx->NotifyCount);
     }
     SaveRegistry(ctx, stage, st);

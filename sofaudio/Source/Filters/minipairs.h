@@ -206,9 +206,9 @@ PENDPOINT_MINIPAIR  g_CaptureEndpoints[] =
     &MicArray1Miniports,
 };
 
-// SOF: no capture endpoint yet (the sample's mic array would be a fake sine
-// wave source). The array is kept so the sample code still compiles.
-#define g_cCaptureEndpoints 0
+// SOF: the mic array endpoint captures from the DSP's DMIC pipeline
+// (SOFAPL_EP_MIC), 48 kHz / 32-bit / stereo.
+#define g_cCaptureEndpoints  (SIZEOF_ARRAY(g_CaptureEndpoints))
 
 //=============================================================================
 //

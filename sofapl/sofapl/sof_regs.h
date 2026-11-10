@@ -165,9 +165,11 @@ typedef struct _SOF_EXT_MAN_HEADER {
 #define SOF_IPC_FRAME_S32_LE            2
 
 #define SOF_TIME_DOMAIN_TIMER           1
+#define SOF_VOLUME_LINEAR               0
 #define SOF_VOLUME_LINEAR_ZC            2
 
 #define SOF_DAI_INTEL_SSP               1
+#define SOF_DAI_INTEL_DMIC              2
 #define SOF_DAI_FMT_I2S                 1
 #define SOF_DAI_FMT_NB_NF               (0 << 8)
 #define SOF_DAI_FMT_CBC_CFC             (4 << 12)   // codec consumes BCLK + FSYNC
@@ -311,6 +313,40 @@ typedef struct _SOF_IPC_DAI_SSP_PARAMS {
     UINT32 bclk_delay;
 } SOF_IPC_DAI_SSP_PARAMS;
 
+// DMIC (include/sound/sof/dai-intel.h): one entry per 2-channel PDM controller.
+#define SOF_DAI_INTEL_DMIC_NUM_CTRL 4
+
+typedef struct _SOF_IPC_DAI_DMIC_PDM_CTRL {
+    SOF_IPC_HDR hdr;
+    UINT16 id;
+    UINT16 enable_mic_a;
+    UINT16 enable_mic_b;
+    UINT16 polarity_mic_a;
+    UINT16 polarity_mic_b;
+    UINT16 clk_edge;
+    UINT16 skew;
+    UINT16 reserved[3];
+} SOF_IPC_DAI_DMIC_PDM_CTRL;
+
+typedef struct _SOF_IPC_DAI_DMIC_PARAMS {
+    SOF_IPC_HDR hdr;
+    UINT32 driver_ipc_version;
+    UINT32 pdmclk_min;
+    UINT32 pdmclk_max;
+    UINT32 fifo_fs;
+    UINT32 reserved_1;
+    UINT16 fifo_bits;
+    UINT16 fifo_bits_b;
+    UINT16 duty_min;
+    UINT16 duty_max;
+    UINT32 num_pdm_active;
+    UINT32 wake_up_time;
+    UINT32 min_clock_on_time;
+    UINT32 unmute_ramp_time;
+    UINT32 reserved[5];
+    SOF_IPC_DAI_DMIC_PDM_CTRL pdm[SOF_DAI_INTEL_DMIC_NUM_CTRL];
+} SOF_IPC_DAI_DMIC_PARAMS;
+
 // The kernel's union is sized by the DMIC params (164 bytes); send the same size.
 #define SOF_DAI_PARAMS_UNION_SIZE 164
 
@@ -324,6 +360,7 @@ typedef struct _SOF_IPC_DAI_CONFIG_MSG {
     UINT32 reserved[8];
     union {
         SOF_IPC_DAI_SSP_PARAMS ssp;
+        SOF_IPC_DAI_DMIC_PARAMS dmic;
         UINT8 raw[SOF_DAI_PARAMS_UNION_SIZE];
     };
 } SOF_IPC_DAI_CONFIG_MSG;
@@ -365,6 +402,8 @@ static_assert(sizeof(SOF_IPC_COMP_DAI) == 80 + 16, "sof_ipc_comp_dai + uuid");
 static_assert(sizeof(SOF_IPC_COMP_VOLUME) == 84 + 16, "sof_ipc_comp_volume + uuid");
 static_assert(sizeof(SOF_IPC_PIPE_NEW) == 48, "sof_ipc_pipe_new");
 static_assert(sizeof(SOF_IPC_DAI_SSP_PARAMS) == 60, "sof_ipc_dai_ssp_params");
+static_assert(sizeof(SOF_IPC_DAI_DMIC_PDM_CTRL) == 24, "sof_ipc_dai_dmic_pdm_ctrl");
+static_assert(sizeof(SOF_IPC_DAI_DMIC_PARAMS) == SOF_DAI_PARAMS_UNION_SIZE, "sof_ipc_dai_dmic_params");
 static_assert(sizeof(SOF_IPC_DAI_CONFIG_MSG) == 216, "sof_ipc_dai_config");
 static_assert(sizeof(SOF_IPC_CTRL_DATA_2CH) == 92 + 16, "sof_ipc_ctrl_data + 2 chanv");
 static_assert(sizeof(SOF_IPC_FW_READY_MSG) == 108, "sof_ipc_fw_ready");

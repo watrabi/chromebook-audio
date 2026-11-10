@@ -46,6 +46,7 @@ public:
         m_DeviceType(DeviceType)
     {
         ASSERT(m_DeviceType == eMicArrayDevice1);
+        m_SofDeviceType = DeviceType;   // SOF: routes volume/mute to the mic pipeline
     }
 
     ~CMicArrayMiniportTopology();

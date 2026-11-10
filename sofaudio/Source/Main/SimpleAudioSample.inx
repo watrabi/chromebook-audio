@@ -3,7 +3,7 @@ Signature   = "$Windows NT$"
 Class       = MEDIA
 Provider    = %ProviderName%
 ClassGUID   = {4d36e96c-e325-11ce-bfc1-08002be10318}
-DriverVer   = 11/09/2026, 0.5.0.0
+DriverVer   = 11/10/2026, 0.6.0.0
 CatalogFile = SimpleAudioSample.cat
 PnpLockDown = 1
 
@@ -152,6 +152,11 @@ AddInterface=%KSCATEGORY_TOPOLOGY%, %KSNAME_TopologyHeadphone%, SIMPLEAUDIOSAMPL
 ;
 ; Interfaces for microphone array 1 (internal: front) capture endpoint.
 ;
+AddInterface=%KSCATEGORY_AUDIO%, %KSNAME_WaveMicArray1%, SIMPLEAUDIOSAMPLE.I.WaveMicArray1
+AddInterface=%KSCATEGORY_REALTIME%, %KSNAME_WaveMicArray1%, SIMPLEAUDIOSAMPLE.I.WaveMicArray1
+AddInterface=%KSCATEGORY_CAPTURE%, %KSNAME_WaveMicArray1%, SIMPLEAUDIOSAMPLE.I.WaveMicArray1
+AddInterface=%KSCATEGORY_AUDIO%, %KSNAME_TopologyMicArray1%, SIMPLEAUDIOSAMPLE.I.TopologyMicArray1
+AddInterface=%KSCATEGORY_TOPOLOGY%, %KSNAME_TopologyMicArray1%, SIMPLEAUDIOSAMPLE.I.TopologyMicArray1
 
 [SIMPLEAUDIOSAMPLE_SA.NT.Services]
 AddService=SimpleAudioSample,0x00000002,SimpleAudioSample_Service_Inst
@@ -223,8 +228,8 @@ SIMPLEAUDIOSAMPLE.TopologySpeaker.szPname="Speakers Topology"
 SIMPLEAUDIOSAMPLE.WaveHeadphone.szPname="Headphones"
 SIMPLEAUDIOSAMPLE.TopologyHeadphone.szPname="Headphones Topology"
 
-SIMPLEAUDIOSAMPLE.WaveMicArray1.szPname="Simple Audio Sample Wave Microphone Array - Front"
-SIMPLEAUDIOSAMPLE.TopologyMicArray1.szPname="Simple Audio Sample Topology Microphone Array - Front"
+SIMPLEAUDIOSAMPLE.WaveMicArray1.szPname="Microphone Array"
+SIMPLEAUDIOSAMPLE.TopologyMicArray1.szPname="Microphone Array Topology"
 
-MicArray1CustomName= "Internal Microphone Array - Front"
+MicArray1CustomName= "Internal Microphone"
 

@@ -274,9 +274,11 @@ Return Value:
     NTSTATUS                    ntStatus = STATUS_INVALID_DEVICE_REQUEST;
 
     // SOF: the adapter stores node values in one array shared by all filters;
-    // shift the headphone filter's volume/mute nodes so the two endpoints
-    // keep separate values (see sofhw.h).
-    ULONG nodeOffset = (m_SofDeviceType == eHeadphoneDevice) ? SOF_NODE_OFFSET_HEADPHONE : 0;
+    // shift the headphone and mic filters' volume/mute nodes so each endpoint
+    // keeps separate values (see sofhw.h).
+    ULONG nodeOffset =
+        (m_SofDeviceType == eHeadphoneDevice) ? SOF_NODE_OFFSET_HEADPHONE :
+        (m_SofDeviceType == eMicArrayDevice1) ? SOF_NODE_OFFSET_MIC : 0;
 
     switch (PropertyRequest->PropertyItem->Id)
     {
